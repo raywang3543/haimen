@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use super::custom::CustomAgent;
+use super::ollama::OllamaAgent;
 use crate::config::settings::GatewayConfig;
 use crate::gateway::provider::AgentProvider;
 use haimen_claude_code::ClaudeAgent;
@@ -173,6 +175,50 @@ fn builtin() -> AgentRegistry {
         })
         .expect("内置 Agent hermes 注册失败");
     registry
+        .register("ollama", "Ollama", |config| {
+            let fields = config.providers.get("ollama");
+            let model_id = fields
+                .and_then(|p| p.get("model_id"))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or("请先配置 Ollama 模型 ID")?;
+            let base_url = fields
+                .and_then(|p| p.get("base_url"))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("http://localhost:11434");
+            Ok(Box::new(OllamaAgent::new(
+                base_url,
+                model_id,
+                config.agent_timeout_secs,
+            )?))
+        })
+        .expect("内置 Agent ollama 注册失败");
+    registry
+        .register("custom", "自定义 Agent", |config| {
+            let fields = config.providers.get("custom");
+            let base_url = fields
+                .and_then(|p| p.get("base_url"))
+                .map(String::as_str)
+                .unwrap_or("");
+            let model_id = fields
+                .and_then(|p| p.get("model_id"))
+                .map(String::as_str)
+                .unwrap_or("");
+            let api_key = fields
+                .and_then(|p| p.get("api_key"))
+                .map(String::as_str)
+                .unwrap_or("");
+            let api_key = crate::config::settings::resolve_env_ref(api_key)?;
+            Ok(Box::new(CustomAgent::new(
+                base_url,
+                model_id,
+                &api_key,
+                config.agent_timeout_secs,
+            )?))
+        })
+        .expect("内置 Agent custom 注册失败");
+    registry
 }
 
 static REGISTRY: OnceLock<AgentRegistry> = OnceLock::new();
@@ -197,6 +243,8 @@ mod tests {
         assert!(registry().has("codex"));
         assert!(registry().has("openclaw"));
         assert!(registry().has("hermes"));
+        assert!(registry().has("ollama"));
+        assert!(registry().has("custom"));
     }
 
     #[test]
@@ -223,6 +271,27 @@ mod tests {
     }
 
     #[test]
+    fn test_build_custom_agent_requires_fields() {
+        assert!(registry().build("custom", &test_config()).is_err());
+        let mut config = test_config();
+        config.providers.insert(
+            "custom".to_string(),
+            HashMap::from([
+                (
+                    "base_url".to_string(),
+                    "https://api.example.com/v1".to_string(),
+                ),
+                ("model_id".to_string(), "example-model".to_string()),
+                ("api_key".to_string(), "test-key".to_string()),
+            ]),
+        );
+        assert_eq!(
+            registry().build("custom", &config).unwrap().name(),
+            "custom"
+        );
+    }
+
+    #[test]
     fn test_build_unknown_agent() {
         let result = registry().build("unknown-agent", &test_config());
         match result {
@@ -239,6 +308,8 @@ mod tests {
         assert!(ids.contains(&"codex"));
         assert!(ids.contains(&"openclaw"));
         assert!(ids.contains(&"hermes"));
+        assert!(ids.contains(&"ollama"));
+        assert!(ids.contains(&"custom"));
     }
 
     #[test]

@@ -6,14 +6,14 @@ export interface ProviderField {
   key: string;
   /** 界面显示名 */
   label: string;
-  /** 输入控件类型（当前 Agent 仅用 text） */
+  /** 输入控件类型 */
   type: 'password' | 'text' | 'select';
   placeholder?: string;
   options?: string[];
 }
 
 export interface ProviderInfo {
-  /** 唯一标识（如 "claude-code" "codex"） */
+  /** 唯一标识（如 "openclaw" "codex"） */
   id: string;
   /** 显示名称 */
   name: string;
@@ -24,14 +24,14 @@ export interface ProviderInfo {
 /** 所有支持的 Agent 提供商 */
 export const AGENT_PROVIDERS: ProviderInfo[] = [
   {
-    id: 'claude-code',
-    name: 'Claude Code',
+    id: 'openclaw',
+    name: 'OpenClaw',
     fields: [
       {
         key: 'cli_path',
         label: 'CLI 路径',
         type: 'text',
-        placeholder: '留空使用 PATH 查找 claude',
+        placeholder: '留空使用 PATH 查找 openclaw',
       },
     ],
   },
@@ -48,26 +48,44 @@ export const AGENT_PROVIDERS: ProviderInfo[] = [
     ],
   },
   {
-    id: 'openclaw',
-    name: 'OpenClaw',
+    id: 'ollama',
+    name: 'Ollama',
     fields: [
       {
-        key: 'cli_path',
-        label: 'CLI 路径',
+        key: 'model_id',
+        label: '模型 ID',
         type: 'text',
-        placeholder: '留空使用 PATH 查找 openclaw',
+        placeholder: '例如 qwen3:8b（先运行 ollama pull）',
+      },
+      {
+        key: 'base_url',
+        label: '服务地址',
+        type: 'text',
+        placeholder: 'http://localhost:11434',
       },
     ],
   },
   {
-    id: 'hermes',
-    name: 'Hermes',
+    id: 'custom',
+    name: '自定义 Agent',
     fields: [
       {
-        key: 'cli_path',
-        label: 'CLI 路径',
+        key: 'base_url',
+        label: 'Base URL',
         type: 'text',
-        placeholder: '留空使用 PATH 查找 hermes',
+        placeholder: 'https://api.example.com/v1',
+      },
+      {
+        key: 'model_id',
+        label: '模型 ID',
+        type: 'text',
+        placeholder: '输入服务商提供的模型 ID',
+      },
+      {
+        key: 'api_key',
+        label: 'API Key',
+        type: 'password',
+        placeholder: '输入 API Key（也可使用环境变量引用）',
       },
     ],
   },

@@ -174,6 +174,17 @@ pub struct ConnectorsSection {
 /// # CLI 工具无需额外凭证
 /// # 可选：hermes CLI 可执行文件路径（留空按 PATH 查找 "hermes"）
 /// # cli_path = "/opt/hermes/bin/hermes"
+///
+/// [gateway.providers.ollama]
+/// model_id = "qwen3:8b"
+/// # 可选：Ollama 服务地址（默认 http://localhost:11434）
+/// # base_url = "http://localhost:11434"
+///
+/// [gateway.providers.custom]
+/// # OpenAI 兼容接口的 API 根地址，请勿包含 /chat/completions
+/// base_url = "https://api.example.com/v1"
+/// model_id = "my-model"
+/// api_key = "${env.CUSTOM_AI_API_KEY}"
 /// ```
 ///
 /// # 向后兼容

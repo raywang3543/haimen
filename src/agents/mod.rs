@@ -1,5 +1,7 @@
+pub mod custom;
 pub mod error;
 pub mod mcp_client;
+pub mod ollama;
 pub mod registry;
 
 mod mcp_agent;

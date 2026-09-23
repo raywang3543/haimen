@@ -18,8 +18,8 @@ function AgentSettingsPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editState, setEditState] = useState<Record<string, Record<string, string>>>({});
-  const [activeProvider, setActiveProvider] = useState('claude-code');
-  const [selectedTab, setSelectedTab] = useState('claude-code');
+  const [activeProvider, setActiveProvider] = useState('openclaw');
+  const [selectedTab, setSelectedTab] = useState('openclaw');
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -47,8 +47,9 @@ function AgentSettingsPanel() {
     try {
       const data = await getAgentSettings();
       setEditState(data.providers ?? {});
-      setActiveProvider(data.active_provider ?? 'claude-code');
-      setSelectedTab(data.active_provider ?? 'claude-code');
+      const active = data.active_provider ?? 'openclaw';
+      setActiveProvider(active);
+      setSelectedTab(AGENT_PROVIDERS.some((p) => p.id === active) ? active : 'openclaw');
     } catch {
       setError('加载 Agent 配置失败');
     } finally {
@@ -66,7 +67,7 @@ function AgentSettingsPanel() {
     try {
       const data = await getAgentSettings();
       setEditState(data.providers ?? {});
-      setActiveProvider(data.active_provider ?? 'claude-code');
+      setActiveProvider(data.active_provider ?? 'openclaw');
     } catch {
       // 静默失败
     }
@@ -124,9 +125,7 @@ function AgentSettingsPanel() {
   const handleVerify = async () => {
     setVerifying(true);
     try {
-      // 携带草稿 cli_path（未保存也能先验证路径是否正确）
-      const draftCliPath = editState[selectedTab]?.cli_path;
-      const result = await verifyAgentCredentials(selectedTab, draftCliPath);
+      const result = await verifyAgentCredentials(selectedTab, editState[selectedTab]);
       setVerifyResult(result);
     } catch {
       setVerifyResult({ valid: false, message: '网络请求失败' });
@@ -173,9 +172,23 @@ function AgentSettingsPanel() {
         <CardTitle className="flex items-center gap-2 text-base">AI Agent 配置</CardTitle>
       </CardHeader>
       <CardContent>
-        <Tabs value={selectedTab} onValueChange={setSelectedTab} className="w-full">
+        {!providers.some((p) => p.id === activeProvider) && (
+          <Alert className="mb-4">
+            <AlertDescription>
+              当前生效的 Agent 不在此页面列表中。选择下方 Agent 并设为首选即可切换。
+            </AlertDescription>
+          </Alert>
+        )}
+        <Tabs
+          value={selectedTab}
+          onValueChange={(value) => {
+            setSelectedTab(value);
+            setVerifyResult(null);
+          }}
+          className="w-full"
+        >
           {/* Tab 栏 */}
-          <TabsList>
+          <TabsList className="max-w-full justify-start overflow-x-auto">
             {providers.map((p) => {
               const isActive = p.id === activeProvider;
 
@@ -209,13 +222,14 @@ function AgentSettingsPanel() {
                 )}
               </div>
 
-              {/* 可配置字段（如 CLI 路径） */}
+              {/* 可配置字段 */}
               {p.fields.map((field) => (
                 <div key={field.key} className="space-y-2">
                   <span className="text-sm font-medium">{field.label}</span>
                   <Input
                     id={`agent-${p.id}-${field.key}`}
-                    type="text"
+                    type={field.type === 'password' ? 'password' : 'text'}
+                    autoComplete={field.type === 'password' ? 'new-password' : undefined}
                     placeholder={field.placeholder ?? `输入${field.label}`}
                     value={editState[p.id]?.[field.key] ?? ''}
                     onChange={(e) => handleFieldChange(field.key, e.target.value)}
@@ -234,7 +248,7 @@ function AgentSettingsPanel() {
               {/* 操作按钮 */}
               <div className="flex items-center gap-2 pt-2 flex-wrap">
                 <Button variant="outline" onClick={handleVerify} disabled={verifying}>
-                  {verifying ? '验证中...' : '验证可用性'}
+                  {verifying ? '验证中...' : p.id === 'custom' ? '检查配置' : '验证可用性'}
                 </Button>
                 <Button onClick={handleSave} disabled={saving}>
                   {saving ? '保存中...' : '保存配置'}
@@ -247,7 +261,7 @@ function AgentSettingsPanel() {
                 {saveResult && (
                   <span
                     className={`text-sm ${
-                      saveResult === '保存成功' || saveResult === '已切换激活服务商'
+                      saveResult.startsWith('保存成功') || saveResult.startsWith('已切换激活服务商')
                         ? 'text-green-600'
                         : 'text-red-600'
                     }`}
@@ -272,8 +286,8 @@ export default function AgentSettings() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Agent 配置</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          选择用于处理消息的 AI Agent。各 Agent 使用本地安装的 CLI 工具，
-          可配置可执行文件路径（留空按 PATH 查找）。
+          选择用于处理消息的 AI Agent。CLI Agent 可配置可执行文件路径；Ollama 和自定义 Agent
+          需要配置模型 ID。
         </p>
       </div>
       <AgentSettingsPanel />

@@ -221,6 +221,18 @@ active_provider = "claude-code"
 # 可选：hermes CLI 可执行文件路径（留空按 PATH 查找 "hermes"）
 # cli_path = "/opt/hermes/bin/hermes"
 
+[gateway.providers.ollama]
+# 先运行 ollama pull qwen3:8b；模型 ID 必填
+model_id = "qwen3:8b"
+# 可选：默认 http://localhost:11434
+# base_url = "http://localhost:11434"
+
+[gateway.providers.custom]
+# OpenAI 兼容接口的 API 根地址（请求路径为 /chat/completions）
+base_url = "https://api.example.com/v1"
+model_id = "my-model"
+api_key = "${env.CUSTOM_AI_API_KEY}"
+
 [gateway.providers.openai]
 api_key = "${env.OPENAI_API_KEY}"
 model = "gpt-4o"
@@ -255,6 +267,30 @@ model = "tts-1"
 
 [tts.providers.edge]
 voice = "zh-CN-XiaoxiaoNeural"
+```
+
+## 通过 API 切换首选 Agent
+
+先在 Web 控制台或 `~/.haimen/settings.toml` 配置目标 Agent，然后请求：
+
+```bash
+curl -X PUT http://127.0.0.1:9527/api/v1/settings/agent/active \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"codex"}'
+```
+
+`provider` 可填已注册的 Agent ID；Web 控制台展示 `openclaw`、`codex`、`ollama`、`custom`。成功响应示例：
+
+```json
+{"success":true,"data":{"active_provider":"codex","applied":true,"applied_agent":"codex","generation":3}}
+```
+
+接口只修改首选 Agent，保留各提供商参数；切换立即生效，旧会话重置。目标已生效时返回 `applied: false`，不会重置会话。缺少 `provider`、ID 不受支持或目标 Agent 不可用时返回 HTTP 400，配置和当前 Agent 保持不变。
+
+查询当前生效 Agent（响应不含提供商参数）：
+
+```bash
+curl http://127.0.0.1:9527/api/v1/settings/agent/active
 ```
 
 ## 许可

@@ -24,6 +24,10 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
+    /// Typed input; skips ASR and uses the existing Agent/TTS session.
+    Text {
+        text: String,
+    },
     Abort,
 }
 

@@ -25,11 +25,13 @@ fn default_voice(provider: &str) -> &'static str {
 }
 
 /// 构建 BaseTtsOption 公共部分
-fn build_base_option(config: &TtsConfig, active: &str) -> BaseTtsOption {
+fn build_base_option(
+    active: &str,
+    get_credential: &impl Fn(&str) -> Option<String>,
+) -> BaseTtsOption {
     BaseTtsOption {
-        api_key: config.get_credential("api_key"),
-        voice: config
-            .get_credential("voice")
+        api_key: get_credential("api_key"),
+        voice: get_credential("voice")
             .or_else(|| Some(default_voice(active).into()))
             .map(|v| VoiceId::from(v.as_str())),
         format: Some("pcm".into()),
@@ -41,25 +43,27 @@ fn build_base_option(config: &TtsConfig, active: &str) -> BaseTtsOption {
 ///
 /// 返回当前 `active_provider` 对应的 TTS Provider，如果提供商不支持或凭证缺失则返回错误。
 pub fn create_tts_provider(config: &TtsConfig) -> Result<Box<dyn TtsProvider>, String> {
+    create_tts_provider_with_credentials(config, |key| config.get_credential(key))
+}
+
+fn create_tts_provider_with_credentials(
+    config: &TtsConfig,
+    get_credential: impl Fn(&str) -> Option<String>,
+) -> Result<Box<dyn TtsProvider>, String> {
     let active = config.active_provider.as_str();
 
     match active {
         "doubao" => {
-            let api_key = config
-                .get_credential("api_key")
-                .ok_or_else(|| "缺少 Doubao API Key".to_string())?;
-            let cluster = config.get_credential("cluster");
-            let resource_id =
-                config
-                    .get_credential("resource_id")
-                    .or_else(|| match cluster.as_deref() {
-                        Some("volcano_icl") => Some("seed-tts-1.0".into()),
-                        _ => Some("seed-tts-2.0".into()),
-                    });
+            let api_key =
+                get_credential("api_key").ok_or_else(|| "缺少 Doubao API Key".to_string())?;
+            let cluster = get_credential("cluster");
+            let resource_id = get_credential("resource_id").or_else(|| match cluster.as_deref() {
+                Some("volcano_icl") => Some("seed-tts-1.0".into()),
+                _ => Some("seed-tts-2.0".into()),
+            });
             // 未配置音色时，按模型（resource_id）选择默认音色，
             // 避免「1.0 模型配 2.0 默认音色」触发火山引擎 55000000 资源不匹配。
-            let voice = config
-                .get_credential("voice")
+            let voice = get_credential("voice")
                 .or_else(|| {
                     Some(
                         match resource_id.as_deref() {
@@ -83,10 +87,9 @@ pub fn create_tts_provider(config: &TtsConfig) -> Result<Box<dyn TtsProvider>, S
             })))
         }
         "qwen" => {
-            let api_key = config
-                .get_credential("api_key")
-                .ok_or_else(|| "缺少 Qwen API Key".to_string())?;
-            let mut base = build_base_option(config, "qwen");
+            let api_key =
+                get_credential("api_key").ok_or_else(|| "缺少 Qwen API Key".to_string())?;
+            let mut base = build_base_option("qwen", &get_credential);
             base.api_key = Some(api_key);
             // Qwen3TTS 使用 DashScope Realtime WebSocket 协议，
             // 支持模型 "qwen3-tts-instruct-flash-realtime"（默认）和 48 个英文音色。
@@ -96,10 +99,9 @@ pub fn create_tts_provider(config: &TtsConfig) -> Result<Box<dyn TtsProvider>, S
             })))
         }
         "glm" => {
-            let api_key = config
-                .get_credential("api_key")
-                .ok_or_else(|| "缺少 GLM API Key".to_string())?;
-            let mut base = build_base_option(config, "glm");
+            let api_key =
+                get_credential("api_key").ok_or_else(|| "缺少 GLM API Key".to_string())?;
+            let mut base = build_base_option("glm", &get_credential);
             base.api_key = Some(api_key);
             Ok(Box::new(GlmTts::new(GlmTtsOption {
                 base,
@@ -107,10 +109,9 @@ pub fn create_tts_provider(config: &TtsConfig) -> Result<Box<dyn TtsProvider>, S
             })))
         }
         "openai" => {
-            let api_key = config
-                .get_credential("api_key")
-                .ok_or_else(|| "缺少 OpenAI API Key".to_string())?;
-            let mut base = build_base_option(config, "openai");
+            let api_key =
+                get_credential("api_key").ok_or_else(|| "缺少 OpenAI API Key".to_string())?;
+            let mut base = build_base_option("openai", &get_credential);
             base.api_key = Some(api_key);
             Ok(Box::new(OpenaiTts::new(OpenaiTtsOption {
                 base,
@@ -118,15 +119,14 @@ pub fn create_tts_provider(config: &TtsConfig) -> Result<Box<dyn TtsProvider>, S
             })))
         }
         "minimax" => {
-            let api_key = config
-                .get_credential("api_key")
-                .ok_or_else(|| "缺少 MiniMax API Key".to_string())?;
-            let mut base = build_base_option(config, "minimax");
+            let api_key =
+                get_credential("api_key").ok_or_else(|| "缺少 MiniMax API Key".to_string())?;
+            let mut base = build_base_option("minimax", &get_credential);
             base.api_key = Some(api_key);
-            if let Some(model) = config.get_credential("model") {
+            if let Some(model) = get_credential("model") {
                 base.model = Some(model);
             }
-            if let Some(speed_str) = config.get_credential("speed") {
+            if let Some(speed_str) = get_credential("speed") {
                 if let Ok(speed) = speed_str.parse::<f32>() {
                     base.speed = Some(speed);
                 }
@@ -229,7 +229,7 @@ mod tests {
             providers: HashMap::new(),
             ..Default::default()
         };
-        let result = create_tts_provider(&config);
+        let result = create_tts_provider_with_credentials(&config, |_| None);
         assert!(result.is_err());
     }
 
@@ -256,7 +256,7 @@ mod tests {
             providers: HashMap::new(),
             ..Default::default()
         };
-        let result = create_tts_provider(&config);
+        let result = create_tts_provider_with_credentials(&config, |_| None);
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("MiniMax API Key"));
     }

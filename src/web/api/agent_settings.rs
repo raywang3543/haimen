@@ -9,8 +9,10 @@
 //!
 //! - `GET /api/v1/settings/agent` — 获取 Agent 配置（active_provider + providers + 当前生效 agent）
 //! - `PUT /api/v1/settings/agent` — 更新 Agent 配置并热切换
+//! - `GET /api/v1/settings/agent/active` — 查询当前首选 Agent（不返回凭证）
+//! - `PUT /api/v1/settings/agent/active` — 仅切换首选 Agent
 //! - `GET /api/v1/agent/providers` — 列出注册表中所有 Agent 提供商
-//! - `POST /api/v1/settings/agent/verify` — 验证指定 Agent CLI 是否可用
+//! - `POST /api/v1/settings/agent/verify` — 验证指定 Agent 是否可用
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,6 +78,24 @@ pub async fn get_agent_settings(
     }))
 }
 
+/// `GET /api/v1/settings/agent/active`
+///
+/// 返回配置中的首选 Agent 和运行时生效状态，不包含提供商参数。
+pub async fn get_active_agent(
+    State(shared_agent): State<crate::gateway::agent_handle::SharedAgent>,
+) -> Json<serde_json::Value> {
+    let cfg = load_config();
+    let snapshot = crate::gateway::agent_handle::snapshot(&shared_agent);
+    Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "active_provider": cfg.gateway.active_provider,
+            "applied_agent": snapshot.name,
+            "generation": snapshot.generation,
+        }
+    }))
+}
+
 /// `PUT /api/v1/settings/agent`
 ///
 /// 替换完整的 Agent 配置并热切换。支持以下字段：
@@ -120,7 +140,7 @@ pub async fn update_agent_settings(
         }
     };
 
-    // 2. check_available（CLI 不可用 → 400，零改动，旧 Agent 继续工作）
+    // 2. check_available（Agent 不可用 → 400，零改动，旧 Agent 继续工作）
     if let Err(e) = candidate.check_available().await {
         let msg = format!("{} 不可用，配置未保存: {}", name, e);
         return Err((
@@ -166,6 +186,72 @@ pub async fn update_agent_settings(
     })))
 }
 
+/// `PUT /api/v1/settings/agent/active`
+///
+/// 请求体：`{"provider":"codex"}`。保留所有提供商参数，只切换首选 Agent。
+/// 沿用配置更新接口的可用性检查与原子热切换；已是当前 Agent 时不重置会话。
+/// 响应仅返回切换状态，不返回已保存的凭证。
+pub async fn set_active_agent(
+    State(shared_agent): State<crate::gateway::agent_handle::SharedAgent>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let provider = body
+        .get("provider")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "provider 必须是非空字符串",
+                    "message": "provider 必须是非空字符串",
+                })),
+            )
+        })?;
+    if !crate::agents::registry::registry().has(provider) {
+        let message = format!("不支持的 AI Agent: {provider}");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": message,
+                "message": message,
+            })),
+        ));
+    }
+
+    let current = load_config();
+    let snapshot = crate::gateway::agent_handle::snapshot(&shared_agent);
+    if current.gateway.active_provider == provider && snapshot.name == provider {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "active_provider": provider,
+                "applied": false,
+                "applied_agent": snapshot.name,
+                "generation": snapshot.generation,
+            }
+        })));
+    }
+
+    let Json(updated) = update_agent_settings(
+        State(shared_agent),
+        Json(serde_json::json!({"active_provider": provider})),
+    )
+    .await?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": {
+            "active_provider": updated["data"]["active_provider"],
+            "applied": true,
+            "applied_agent": updated["data"]["applied_agent"],
+            "generation": updated["data"]["generation"],
+        }
+    })))
+}
+
 /// `GET /api/v1/agent/providers`
 ///
 /// 返回注册表中所有可用的 Agent 提供商（id + display_name）。
@@ -192,9 +278,9 @@ pub async fn list_agent_providers() -> Json<serde_json::Value> {
 ///
 /// 验证指定 Agent 提供商是否可用。
 ///
-/// 请求体包含 `provider` 字段；可选 `cli_path` 字段用于验证**草稿**路径
+/// 请求体包含 `provider` 字段；可选 `fields` 用于验证**草稿**配置
 /// （尚未保存到配置）。统一通过注册表构造 Agent 并调用其
-/// `check_available()`（如 `claude --version` / `codex --version`），
+/// `check_available()`（如 CLI 版本检查或 Ollama 模型检查），
 /// 新增 Agent 无需改动此处。
 pub async fn verify_agent_credentials(
     Json(body): Json<serde_json::Value>,
@@ -206,8 +292,24 @@ pub async fn verify_agent_credentials(
 
     let mut cfg = load_config();
 
-    // 可选草稿 cli_path：验证未保存的路径。注入克隆配置后由注册表构造，
-    // check_available 会用该路径做 --version 探活（不写盘、不改内存）。
+    // 草稿字段覆盖已保存配置；不写盘、不改内存。
+    if let Some(fields) = body.get("fields").and_then(|v| v.as_object()) {
+        let provider_fields = cfg
+            .gateway
+            .providers
+            .entry(provider.to_string())
+            .or_default();
+        for (key, value) in fields {
+            if let Some(value) = value.as_str() {
+                if value.trim().is_empty() {
+                    provider_fields.remove(key);
+                } else {
+                    provider_fields.insert(key.clone(), value.to_string());
+                }
+            }
+        }
+    }
+    // 保留旧客户端直接传 cli_path 的行为。
     if let Some(path) = body
         .get("cli_path")
         .and_then(|v| v.as_str())
@@ -233,7 +335,11 @@ pub async fn verify_agent_credentials(
     match agent.check_available().await {
         Ok(()) => Ok(Json(serde_json::json!({
             "success": true,
-            "data": { "valid": true, "message": format!("{} CLI 可用", agent.name()) }
+            "data": { "valid": true, "message": if provider == "custom" {
+                "配置格式有效；服务连接和 API Key 将在发送消息时验证".to_string()
+            } else {
+                format!("{} 可用", agent.name())
+            } }
         }))),
         Err(e) => Ok(Json(serde_json::json!({
             "success": true,
@@ -336,6 +442,138 @@ mod tests {
             let snap = crate::gateway::agent_handle::snapshot(&shared);
             assert_eq!(snap.name, "mock-agent");
             assert_eq!(snap.generation, 0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_set_active_agent_preserves_config_and_skips_repeated_switch() {
+        run_with_temp_home_async(move |_home| async move {
+            let mut cfg = AppConfig::default();
+            cfg.gateway.providers.insert(
+                "custom".to_string(),
+                HashMap::from([
+                    (
+                        "base_url".to_string(),
+                        "https://api.example.com/v1".to_string(),
+                    ),
+                    ("model_id".to_string(), "example-model".to_string()),
+                    ("api_key".to_string(), "test-key".to_string()),
+                ]),
+            );
+            cfg.gateway.providers.insert(
+                "codex".to_string(),
+                HashMap::from([("cli_path".to_string(), "/opt/codex".to_string())]),
+            );
+            crate::config::settings::save_settings(&cfg).unwrap();
+
+            let shared = crate::gateway::agent_handle::into_shared(Box::new(MockAgent));
+            let Json(result) = set_active_agent(
+                State(shared.clone()),
+                Json(serde_json::json!({"provider": "custom"})),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["data"]["active_provider"], "custom");
+            assert_eq!(result["data"]["applied"], true);
+            assert_eq!(result["data"]["generation"], 1);
+            assert!(result["data"].get("providers").is_none());
+            assert_eq!(
+                crate::gateway::agent_handle::current_name(&shared),
+                "custom"
+            );
+            let saved = crate::config::settings::load_settings().unwrap().unwrap();
+            assert_eq!(saved.gateway.active_provider, "custom");
+            assert_eq!(saved.gateway.providers, cfg.gateway.providers);
+            let Json(current) = get_active_agent(State(shared.clone())).await;
+            assert_eq!(current["data"]["active_provider"], "custom");
+            assert_eq!(current["data"]["applied_agent"], "custom");
+            assert!(current["data"].get("providers").is_none());
+
+            let Json(repeated) = set_active_agent(
+                State(shared.clone()),
+                Json(serde_json::json!({"provider": "custom"})),
+            )
+            .await
+            .unwrap();
+            assert_eq!(repeated["data"]["applied"], false);
+            assert_eq!(repeated["data"]["generation"], 1);
+            assert_eq!(crate::gateway::agent_handle::current_generation(&shared), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_set_active_agent_rejects_invalid_provider_without_switching() {
+        run_with_temp_home_async(move |_home| async move {
+            let shared = crate::gateway::agent_handle::into_shared(Box::new(MockAgent));
+            for body in [
+                serde_json::json!({}),
+                serde_json::json!({"provider": "  "}),
+                serde_json::json!({"provider": "does-not-exist"}),
+            ] {
+                let (status, payload) = set_active_agent(State(shared.clone()), Json(body))
+                    .await
+                    .expect_err("无效 provider 应返回 400");
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(payload.0["success"], false);
+            }
+            assert_eq!(crate::gateway::agent_handle::current_generation(&shared), 0);
+            assert!(crate::config::settings::load_settings().unwrap().is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_ollama_draft_fields() {
+        run_with_temp_home_async(move |_home| async move {
+            let app = axum::Router::new().route(
+                "/api/tags",
+                axum::routing::get(|| async {
+                    Json(serde_json::json!({"models": [{"name": "qwen3:8b"}]}))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let result = verify_agent_credentials(Json(serde_json::json!({
+                "provider": "ollama",
+                "fields": {
+                    "model_id": "qwen3:8b",
+                    "base_url": format!("http://{address}"),
+                }
+            })))
+            .await
+            .unwrap();
+            assert_eq!(result.0["data"]["valid"], true);
+            assert!(crate::config::settings::load_settings().unwrap().is_none());
+            server.abort();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_verify_custom_draft_fields_checks_format_only() {
+        run_with_temp_home_async(move |_home| async move {
+            let result = verify_agent_credentials(Json(serde_json::json!({
+                "provider": "custom",
+                "fields": {
+                    "base_url": "https://api.example.com/v1",
+                    "model_id": "example-model",
+                    "api_key": "test-key",
+                }
+            })))
+            .await
+            .unwrap();
+            assert_eq!(result.0["data"]["valid"], true);
+            assert!(
+                result.0["data"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("将在发送消息时验证")
+            );
+            assert!(crate::config::settings::load_settings().unwrap().is_none());
         })
         .await;
     }

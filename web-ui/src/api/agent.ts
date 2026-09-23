@@ -14,17 +14,16 @@ interface RawProvider {
 }
 
 /**
- * 从注册表拉取所有可用 Agent 提供商（后端驱动，新增 Agent 前端零改动）。
- * 返回结构归一化为前端的 ProviderInfo（name 字段），字段定义从静态列表合并
- * （后端只报 id + 显示名，字段 schema 属前端声明）。
+ * 从注册表拉取 Web 页面展示的 Agent，按 AGENT_PROVIDERS 的顺序排列。
+ * 后端仍可注册更多 Agent；页面仅展示静态列表中指定的四个。
  */
 export async function getAgentProviders(): Promise<ProviderInfo[]> {
   const res = await apiFetch<ApiResponse<{ providers: RawProvider[] }>>('/api/v1/agent/providers');
   const data = ensureData(res);
-  return (data.providers ?? []).map((p) => ({
-    id: p.id,
-    name: p.display_name,
-    fields: AGENT_PROVIDERS.find((s) => s.id === p.id)?.fields ?? [],
+  const available = new Map((data.providers ?? []).map((p) => [p.id, p]));
+  return AGENT_PROVIDERS.filter((p) => available.has(p.id)).map((p) => ({
+    ...p,
+    name: available.get(p.id)?.display_name ?? p.name,
   }));
 }
 
@@ -46,13 +45,13 @@ export async function updateAgentSettings(settings: {
 
 export async function verifyAgentCredentials(
   provider: string,
-  cliPath?: string,
+  fields?: Record<string, string>,
 ): Promise<{ valid: boolean; message: string }> {
   const res = await apiFetch<ApiResponse<{ valid: boolean; message: string }>>(
     '/api/v1/settings/agent/verify',
     {
       method: 'POST',
-      body: JSON.stringify({ provider, cli_path: cliPath ?? '' }),
+      body: JSON.stringify({ provider, fields: fields ?? {} }),
     },
   );
   return ensureData(res);

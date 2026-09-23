@@ -82,6 +82,11 @@ pub async fn start(
             axum::routing::put(api::agent_settings::update_agent_settings),
         )
         .route(
+            "/api/v1/settings/agent/active",
+            axum::routing::get(api::agent_settings::get_active_agent)
+                .put(api::agent_settings::set_active_agent),
+        )
+        .route(
             "/api/v1/settings/agent/verify",
             axum::routing::post(api::agent_settings::verify_agent_credentials),
         )

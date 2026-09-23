@@ -1441,238 +1441,14 @@ impl AsrLlmTtsStrategy {
     }
 }
 
-#[async_trait]
-impl ResponseStrategy for AsrLlmTtsStrategy {
-    fn name(&self) -> &'static str {
-        "asr-llm-tts"
-    }
-
-    /// 告知设备使用 24000Hz 播放（匹配 TTS 引擎输出）
-    fn hello_audio_params(&self, _client_params: &AudioParams) -> AudioParams {
-        AudioParams {
-            format: "opus".into(),
-            sample_rate: 24000,
-            channels: 1,
-            frame_duration: 60,
-        }
-    }
-
-    // ────────── 流式 ASR 支持 ──────────
-
-    fn supports_streaming_asr(&self) -> bool {
-        true
-    }
-
-    /// 录音开始时清空管道状态
-    ///
-    /// ASR 管道不会在此处创建，而是延迟到 `on_audio_frame` 收到第一帧音频时
-    /// 通过 `init_asr_pipeline` 惰性初始化。这样可以避免在用户尚未说话时
-    /// 建立 ASR 连接导致服务端对空音频返回误判的 VAD 端点。
-    async fn on_recording_start(&self, session_id: &str) -> Result<(), String> {
-        tracing::info!(
-            session_id = %session_id,
-            "流式 ASR: 清空管道状态（惰性初始化）",
-        );
-
-        let mut guard = self
-            .streaming_state
-            .lock()
-            .map_err(|e| format!("锁获取失败: {}", e))?;
-        *guard = None;
-        // 创建全新 Notify 清除上一轮残留的通知信号
-        if let Ok(mut ng) = self.vad_notify.lock() {
-            *ng = Arc::new(Notify::new());
-        }
-        if let Ok(mut ng) = self.no_speech_notify.lock() {
-            *ng = Arc::new(Notify::new());
-        }
-        self.silence_closed.store(false, Ordering::Release);
-
-        Ok(())
-    }
-
-    /// 每收到一帧 Opus 数据时，实时解码并喂入 ASR 管道
-    ///
-    /// 如果 ASR 管道尚未初始化（惰性），第一帧音频到达时会自动创建。
-    /// 这样确保 ASR WebSocket 连接只在用户真正说话时建立。
-    async fn on_audio_frame(&self, frame: &AudioFrame) -> Result<(), String> {
-        if frame.data.is_empty() {
-            return Ok(());
-        }
-
-        // 如果本地能量检测已关闭管道，跳过后续帧（不重新初始化）
-        if self.silence_closed.load(Ordering::Acquire) {
-            return Ok(());
-        }
-
-        // 惰性初始化：第一帧音频到达时才创建 ASR 管道
-        let needs_init = self
-            .streaming_state
-            .lock()
-            .map_err(|e| format!("锁获取失败: {}", e))?
-            .is_none();
-        if needs_init {
-            tracing::info!("流式 ASR: 第一帧音频到达，惰性初始化管道");
-            self.init_asr_pipeline().await?;
-        }
-
-        // ── Phase 1: 解码 + PCM 能量检测（锁内） ──
-        let (pcm_bytes, pcm_tx) = {
-            let mut guard = self
-                .streaming_state
-                .lock()
-                .map_err(|e| format!("锁获取失败: {}", e))?;
-            let state = guard
-                .as_mut()
-                .ok_or_else(|| "流式 ASR 未启动".to_string())?;
-
-            state.frame_count += 1;
-            // 每 50 帧（~3s）打印一次接收诊断日志
-            if state.frame_count - state.last_log_frame >= 50 {
-                state.last_log_frame = state.frame_count;
-                tracing::info!(
-                    "流式 ASR: 已接收 {} 帧 ({:.0}s 音频)",
-                    state.frame_count,
-                    state.frame_count as f64 * 60.0 / 1000.0,
-                );
-            }
-
-            let mut pcm_buf = vec![0i16; state.frame_samples];
-            let decoded_samples = state
-                .decoder
-                .decode(&frame.data, &mut pcm_buf, false)
-                .map_err(|e| format!("Opus 解码错误: {}", e))?;
-
-            // i16 → little-endian bytes
-            let mut pcm_bytes = Vec::with_capacity(decoded_samples * 2);
-            for sample in &pcm_buf[..decoded_samples] {
-                pcm_bytes.extend_from_slice(&sample.to_le_bytes());
-            }
-
-            // ── 本地 PCM 能量检测 ──
-            let rms = compute_pcm_rms(&pcm_bytes);
-            if rms >= SILENCE_RMS_THRESHOLD {
-                state.speech_detected = true;
-                state.silence_count = 0;
-                state.no_speech_frames = 0; // 检测到有效语音，无语音超时作废
-            } else if state.speech_detected {
-                // 只在首次语音后的静音才累计
-                state.silence_count = state.silence_count.saturating_add(1);
-            } else {
-                // 初始静音（从头到尾没说话）：累计无语音超时帧数
-                state.no_speech_frames = state.no_speech_frames.saturating_add(1);
-            }
-
-            // 无语音超时：初始静音持续达到配置阈值 → 播报告别并关闭连接
-            // （与下方 VAD 互斥：speech_detected=true 后 no_speech_frames 恒为 0；
-            //   本路径置 silence_closed 后，后续帧在此前的短路处被忽略）
-            let no_speech_timeout_ms = self.tts_config.read().unwrap().no_speech_timeout_ms;
-            if no_speech_timeout_ms > 0
-                && state.no_speech_frames >= no_speech_threshold_frames(no_speech_timeout_ms)
-            {
-                // 关闭 ASR 流：替换 sender，令 ASR 后台任务感知流结束
-                let (new_tx, _) = mpsc::channel::<Vec<u8>>(1);
-                let _ = std::mem::replace(&mut state.pcm_tx, new_tx);
-                tracing::info!(
-                    "无语音超时: 录音开始后 {} 帧 ({}ms) 无有效语音，触发告别并关闭连接",
-                    state.no_speech_frames,
-                    state.no_speech_frames * 60,
-                );
-                self.silence_closed.store(true, Ordering::Release);
-                if let Ok(guard) = self.no_speech_notify.lock() {
-                    guard.notify_one();
-                }
-                // 不发送此静音帧
-                return Ok(());
-            }
-
-            if state.silence_count >= MAX_SILENCE_FRAMES
-                && self.asr_received_text.load(Ordering::Acquire)
-            {
-                // 静音超阈值且 ASR 已经识别到过有效文本：关闭 ASR 流
-                // 如果 ASR 还未返回任何非空文本（用户还没说话），则不触发本地 VAD，
-                // 让系统继续等待（30s 安全超时兜底），避免用户正在思考时被提前中断
-                let (new_tx, _) = mpsc::channel::<Vec<u8>>(1);
-                let _ = std::mem::replace(&mut state.pcm_tx, new_tx);
-                tracing::info!(
-                    "本地能量 VAD: 检测到 {} 帧连续静音 ({:.0}s)，关闭 ASR 流",
-                    state.silence_count,
-                    state.silence_count as f64 * 60.0 / 1000.0,
-                );
-                self.silence_closed.store(true, Ordering::Release);
-                if let Ok(guard) = self.vad_notify.lock() {
-                    guard.notify_one();
-                }
-                // 不发送此帧（静音帧无意义）
-                return Ok(());
-            }
-
-            (pcm_bytes, state.pcm_tx.clone())
-        }; // MutexGuard 在此处释放
-
-        // ── Phase 2: 发送 PCM 到 ASR（锁外） ──
-        pcm_tx
-            .send(pcm_bytes)
-            .await
-            .map_err(|_| "ASR 管道已关闭".to_string())?;
-
-        Ok(())
-    }
-
-    // ────────── 流式回放支持 ──────────
-
-    fn supports_streaming_playback(&self) -> bool {
-        true
-    }
-
-    // ────────── VAD 端点检测 ──────────
-
-    fn vad_completion(&self) -> Option<Arc<Notify>> {
-        self.vad_notify.lock().ok().map(|g| g.clone())
-    }
-
-    // ────────── 无语音超时 ──────────
-
-    fn no_speech_completion(&self) -> Option<Arc<Notify>> {
-        self.no_speech_notify.lock().ok().map(|g| g.clone())
-    }
-
-    /// 无语音超时后的告别音频（如「拜拜」）：读配置文案，合成后返回帧
-    /// 交给 ws.rs 的 `play_greeting_frames` 播放。任何失败都静默跳过。
-    async fn goodbye_frames(&self, session_id: &str) -> Option<Vec<AudioFrame>> {
-        let text = {
-            let cfg = self.tts_config.read().unwrap();
-            cfg.no_speech_goodbye
-                .clone()
-                .filter(|t| !t.trim().is_empty())
-                .unwrap_or_else(|| "拜拜".to_string())
-        };
-        self.synthesize_audio(&text, session_id, "无语音告别").await
-    }
-
-    /// 流式生成 ASR → LLM → TTS 响应并逐帧发送
-    ///
-    /// 相较 [`generate_response`]：
-    /// - Agent 使用 `process_stream` 流式输出
-    /// - TTS 使用 `speak_stream` 边合成边返回音频
-    /// - 每块音频立即编码为 Opus 帧并通过 `frame_tx` 发送
-    async fn generate_response_stream(
+impl AsrLlmTtsStrategy {
+    /// Shared Agent/TTS path for recognized speech and typed input.
+    async fn respond_to_text_stream(
         &self,
-        audio_buffer: Vec<AudioFrame>,
+        user_text: String,
         session_id: &str,
         frame_tx: tokio::sync::mpsc::Sender<PlaybackEvent>,
     ) -> Result<(), String> {
-        // ════════════════════════════════════════════════════════════════
-        // Phase 1: 获取用户语音识别文本
-        // ════════════════════════════════════════════════════════════════
-
-        let user_text = match self.resolve_user_text(&audio_buffer, session_id).await? {
-            Some(text) => text,
-            None => {
-                return Ok(());
-            }
-        };
-
         tracing::info!(
             session_id = %session_id,
             text_len = user_text.len(),
@@ -2263,6 +2039,253 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
         );
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ResponseStrategy for AsrLlmTtsStrategy {
+    fn name(&self) -> &'static str {
+        "asr-llm-tts"
+    }
+
+    /// 告知设备使用 24000Hz 播放（匹配 TTS 引擎输出）
+    fn hello_audio_params(&self, _client_params: &AudioParams) -> AudioParams {
+        AudioParams {
+            format: "opus".into(),
+            sample_rate: 24000,
+            channels: 1,
+            frame_duration: 60,
+        }
+    }
+
+    // ────────── 流式 ASR 支持 ──────────
+
+    fn supports_streaming_asr(&self) -> bool {
+        true
+    }
+
+    /// 录音开始时清空管道状态
+    ///
+    /// ASR 管道不会在此处创建，而是延迟到 `on_audio_frame` 收到第一帧音频时
+    /// 通过 `init_asr_pipeline` 惰性初始化。这样可以避免在用户尚未说话时
+    /// 建立 ASR 连接导致服务端对空音频返回误判的 VAD 端点。
+    async fn on_recording_start(&self, session_id: &str) -> Result<(), String> {
+        tracing::info!(
+            session_id = %session_id,
+            "流式 ASR: 清空管道状态（惰性初始化）",
+        );
+
+        let mut guard = self
+            .streaming_state
+            .lock()
+            .map_err(|e| format!("锁获取失败: {}", e))?;
+        *guard = None;
+        // 创建全新 Notify 清除上一轮残留的通知信号
+        if let Ok(mut ng) = self.vad_notify.lock() {
+            *ng = Arc::new(Notify::new());
+        }
+        if let Ok(mut ng) = self.no_speech_notify.lock() {
+            *ng = Arc::new(Notify::new());
+        }
+        self.silence_closed.store(false, Ordering::Release);
+
+        Ok(())
+    }
+
+    /// 每收到一帧 Opus 数据时，实时解码并喂入 ASR 管道
+    ///
+    /// 如果 ASR 管道尚未初始化（惰性），第一帧音频到达时会自动创建。
+    /// 这样确保 ASR WebSocket 连接只在用户真正说话时建立。
+    async fn on_audio_frame(&self, frame: &AudioFrame) -> Result<(), String> {
+        if frame.data.is_empty() {
+            return Ok(());
+        }
+
+        // 如果本地能量检测已关闭管道，跳过后续帧（不重新初始化）
+        if self.silence_closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // 惰性初始化：第一帧音频到达时才创建 ASR 管道
+        let needs_init = self
+            .streaming_state
+            .lock()
+            .map_err(|e| format!("锁获取失败: {}", e))?
+            .is_none();
+        if needs_init {
+            tracing::info!("流式 ASR: 第一帧音频到达，惰性初始化管道");
+            self.init_asr_pipeline().await?;
+        }
+
+        // ── Phase 1: 解码 + PCM 能量检测（锁内） ──
+        let (pcm_bytes, pcm_tx) = {
+            let mut guard = self
+                .streaming_state
+                .lock()
+                .map_err(|e| format!("锁获取失败: {}", e))?;
+            let state = guard
+                .as_mut()
+                .ok_or_else(|| "流式 ASR 未启动".to_string())?;
+
+            state.frame_count += 1;
+            // 每 50 帧（~3s）打印一次接收诊断日志
+            if state.frame_count - state.last_log_frame >= 50 {
+                state.last_log_frame = state.frame_count;
+                tracing::info!(
+                    "流式 ASR: 已接收 {} 帧 ({:.0}s 音频)",
+                    state.frame_count,
+                    state.frame_count as f64 * 60.0 / 1000.0,
+                );
+            }
+
+            let mut pcm_buf = vec![0i16; state.frame_samples];
+            let decoded_samples = state
+                .decoder
+                .decode(&frame.data, &mut pcm_buf, false)
+                .map_err(|e| format!("Opus 解码错误: {}", e))?;
+
+            // i16 → little-endian bytes
+            let mut pcm_bytes = Vec::with_capacity(decoded_samples * 2);
+            for sample in &pcm_buf[..decoded_samples] {
+                pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+
+            // ── 本地 PCM 能量检测 ──
+            let rms = compute_pcm_rms(&pcm_bytes);
+            if rms >= SILENCE_RMS_THRESHOLD {
+                state.speech_detected = true;
+                state.silence_count = 0;
+                state.no_speech_frames = 0; // 检测到有效语音，无语音超时作废
+            } else if state.speech_detected {
+                // 只在首次语音后的静音才累计
+                state.silence_count = state.silence_count.saturating_add(1);
+            } else {
+                // 初始静音（从头到尾没说话）：累计无语音超时帧数
+                state.no_speech_frames = state.no_speech_frames.saturating_add(1);
+            }
+
+            // 无语音超时：初始静音持续达到配置阈值 → 播报告别并关闭连接
+            // （与下方 VAD 互斥：speech_detected=true 后 no_speech_frames 恒为 0；
+            //   本路径置 silence_closed 后，后续帧在此前的短路处被忽略）
+            let no_speech_timeout_ms = self.tts_config.read().unwrap().no_speech_timeout_ms;
+            if no_speech_timeout_ms > 0
+                && state.no_speech_frames >= no_speech_threshold_frames(no_speech_timeout_ms)
+            {
+                // 关闭 ASR 流：替换 sender，令 ASR 后台任务感知流结束
+                let (new_tx, _) = mpsc::channel::<Vec<u8>>(1);
+                let _ = std::mem::replace(&mut state.pcm_tx, new_tx);
+                tracing::info!(
+                    "无语音超时: 录音开始后 {} 帧 ({}ms) 无有效语音，触发告别并关闭连接",
+                    state.no_speech_frames,
+                    state.no_speech_frames * 60,
+                );
+                self.silence_closed.store(true, Ordering::Release);
+                if let Ok(guard) = self.no_speech_notify.lock() {
+                    guard.notify_one();
+                }
+                // 不发送此静音帧
+                return Ok(());
+            }
+
+            if state.silence_count >= MAX_SILENCE_FRAMES
+                && self.asr_received_text.load(Ordering::Acquire)
+            {
+                // 静音超阈值且 ASR 已经识别到过有效文本：关闭 ASR 流
+                // 如果 ASR 还未返回任何非空文本（用户还没说话），则不触发本地 VAD，
+                // 让系统继续等待（30s 安全超时兜底），避免用户正在思考时被提前中断
+                let (new_tx, _) = mpsc::channel::<Vec<u8>>(1);
+                let _ = std::mem::replace(&mut state.pcm_tx, new_tx);
+                tracing::info!(
+                    "本地能量 VAD: 检测到 {} 帧连续静音 ({:.0}s)，关闭 ASR 流",
+                    state.silence_count,
+                    state.silence_count as f64 * 60.0 / 1000.0,
+                );
+                self.silence_closed.store(true, Ordering::Release);
+                if let Ok(guard) = self.vad_notify.lock() {
+                    guard.notify_one();
+                }
+                // 不发送此帧（静音帧无意义）
+                return Ok(());
+            }
+
+            (pcm_bytes, state.pcm_tx.clone())
+        }; // MutexGuard 在此处释放
+
+        // ── Phase 2: 发送 PCM 到 ASR（锁外） ──
+        pcm_tx
+            .send(pcm_bytes)
+            .await
+            .map_err(|_| "ASR 管道已关闭".to_string())?;
+
+        Ok(())
+    }
+
+    // ────────── 流式回放支持 ──────────
+
+    fn supports_streaming_playback(&self) -> bool {
+        true
+    }
+
+    // ────────── VAD 端点检测 ──────────
+
+    fn vad_completion(&self) -> Option<Arc<Notify>> {
+        self.vad_notify.lock().ok().map(|g| g.clone())
+    }
+
+    // ────────── 无语音超时 ──────────
+
+    fn no_speech_completion(&self) -> Option<Arc<Notify>> {
+        self.no_speech_notify.lock().ok().map(|g| g.clone())
+    }
+
+    /// 无语音超时后的告别音频（如「拜拜」）：读配置文案，合成后返回帧
+    /// 交给 ws.rs 的 `play_greeting_frames` 播放。任何失败都静默跳过。
+    async fn goodbye_frames(&self, session_id: &str) -> Option<Vec<AudioFrame>> {
+        let text = {
+            let cfg = self.tts_config.read().unwrap();
+            cfg.no_speech_goodbye
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| "拜拜".to_string())
+        };
+        self.synthesize_audio(&text, session_id, "无语音告别").await
+    }
+
+    /// 流式生成 ASR → LLM → TTS 响应并逐帧发送
+    ///
+    /// 相较 [`generate_response`]：
+    /// - Agent 使用 `process_stream` 流式输出
+    /// - TTS 使用 `speak_stream` 边合成边返回音频
+    /// - 每块音频立即编码为 Opus 帧并通过 `frame_tx` 发送
+    async fn generate_response_stream(
+        &self,
+        audio_buffer: Vec<AudioFrame>,
+        session_id: &str,
+        frame_tx: tokio::sync::mpsc::Sender<PlaybackEvent>,
+    ) -> Result<(), String> {
+        // ════════════════════════════════════════════════════════════════
+        // Phase 1: 获取用户语音识别文本
+        // ════════════════════════════════════════════════════════════════
+
+        let user_text = match self.resolve_user_text(&audio_buffer, session_id).await? {
+            Some(text) => text,
+            None => {
+                return Ok(());
+            }
+        };
+
+        self.respond_to_text_stream(user_text, session_id, frame_tx)
+            .await
+    }
+
+    async fn generate_text_response_stream(
+        &self,
+        text: String,
+        session_id: &str,
+        frame_tx: tokio::sync::mpsc::Sender<PlaybackEvent>,
+    ) -> Result<(), String> {
+        self.respond_to_text_stream(text, session_id, frame_tx)
+            .await
     }
 
     /// 生成 ASR → LLM → TTS 响应

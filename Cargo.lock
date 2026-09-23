@@ -957,6 +957,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "univoice",
+ "uuid",
  "webbrowser",
 ]
 

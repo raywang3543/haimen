@@ -263,6 +263,9 @@ async fn handle_text_message(text: &str, socket: &mut WebSocket, session: &mut S
             ClientMessage::Listen { state, mode, text } => {
                 handle_listen(state, mode, text, socket, session).await;
             }
+            ClientMessage::Text { text } => {
+                handle_typed_text(text, socket, session).await;
+            }
             ClientMessage::Abort => {
                 handle_abort(socket, session).await;
             }
@@ -283,6 +286,41 @@ async fn handle_text_message(text: &str, socket: &mut WebSocket, session: &mut S
             .await;
         }
     }
+}
+
+/// Typed turns share the cancellable streaming playback path with voice turns.
+async fn handle_typed_text(text: String, socket: &mut WebSocket, session: &mut Session) {
+    let text = text.trim();
+    let error = if session.state != SessionState::Ready {
+        Some(("invalid_state", "请等待当前对话结束再发送文字"))
+    } else if text.is_empty() || text.len() > 32_768 {
+        Some(("invalid_text", "文字不能为空，且不能超过 32768 字节"))
+    } else {
+        None
+    };
+    if let Some((code, message)) = error {
+        let _ = send_json(
+            socket,
+            &ServerMessage::Error {
+                code: code.to_string(),
+                message: message.to_string(),
+            },
+        )
+        .await;
+        return;
+    }
+    session.audio_buffer.clear();
+    session.recording_deadline = None;
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let strategy = session.strategy.clone();
+    let session_id = session.session_id.clone();
+    let text = text.to_string();
+    let task = tokio::spawn(async move {
+        strategy
+            .generate_text_response_stream(text, &session_id, tx)
+            .await
+    });
+    playback_frames_stream(socket, session, rx, task).await;
 }
 
 // ─── Listen 状态机 ─────────────────────────────────────────
@@ -747,32 +785,40 @@ async fn playback_frames_stream(
                         }
                     }
                     None => {
-                        // 生成任务已经结束，不管预缓冲了多少帧都直接播放
+                        // Drain queued events before observing task completion.
+                        gen_done = true;
+                        let result = (&mut gen_handle).await;
+                        cancel_on_drop.disarm();
+                        let error = match result {
+                            Ok(Ok(())) => None,
+                            Ok(Err(error)) => Some(error),
+                            Err(error) => Some(error.to_string()),
+                        };
+                        if let Some(message) = error {
+                            let _ = send_json(socket, &ServerMessage::Error {
+                                code: "generation_error".to_string(), message,
+                            }).await;
+                            session.state = SessionState::Ready;
+                            return;
+                        }
                         break;
                     }
                 }
             }
-            result = &mut gen_handle => {
-                gen_done = true;
-                cancel_on_drop.disarm();
-                match result {
-                    Ok(Ok(())) => {
-                        // 生成正常完成
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Streaming generation error during prebuffer",
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Streaming generation task panicked during prebuffer",
-                        );
-                    }
+            message = socket.recv() => {
+                let interrupt = match message {
+                    Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(ClientMessage::Abort) => Some(PlaybackInterrupt::Abort),
+                        Ok(ClientMessage::Listen { state: ListenState::Start, .. }) => Some(PlaybackInterrupt::ListenStart),
+                        _ => None,
+                    },
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => Some(PlaybackInterrupt::Closed),
+                    _ => None,
+                };
+                if let Some(interrupt) = interrupt {
+                    handle_playback_interrupt(socket, session, interrupt).await;
+                    return;
                 }
-                break;
             }
         }
     }
@@ -790,6 +836,15 @@ async fn playback_frames_stream(
                 break;
             }
         }
+        let _ = send_json(
+            socket,
+            &ServerMessage::Tts {
+                session_id: session.session_id.clone(),
+                state: TtsState::Stop,
+                text: None,
+            },
+        )
+        .await;
         session.state = SessionState::Ready;
         return;
     }
@@ -854,7 +909,7 @@ async fn playback_frames_stream(
     // 发送时钟避免 socket 有消息返回时 wait_frame_interrupt 提前结束、
     // 压缩帧间隔导致的突发快发（会冲击设备 jitter buffer 引发丢帧）。
 
-    loop {
+    while !gen_done {
         tokio::select! {
             event = frame_rx.recv(), if !gen_done => {
                 match event {

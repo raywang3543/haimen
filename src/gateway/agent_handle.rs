@@ -1,6 +1,6 @@
 //! 共享 Agent 句柄 —— Agent 运行时热切换的权威状态
 //!
-//! 在 Web 端切换 Agent（`PUT /api/v1/settings/agent`）时，运行进程需要
+//! 在 Web 端或切换 API 设置 Agent（`PUT /api/v1/settings/agent/active`）时，运行进程需要
 //! "下一条消息就用新 Agent"，而非重启后生效。为此把"当前生效的 Agent"提升为
 //! 一份跨线程共享、可在运行时替换的引用：[`SharedAgent`]。
 //!

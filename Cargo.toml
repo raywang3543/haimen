@@ -120,6 +120,7 @@ hex = { workspace = true }
 dingtalk-stream = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
+uuid = { workspace = true }
 
 # Workspace crate 依赖
 haimen-core = { path = "crates/haimen-core", version = "0.1.2" }

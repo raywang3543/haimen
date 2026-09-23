@@ -139,6 +139,16 @@ pub trait ResponseStrategy: Send + Sync {
         Ok(())
     }
 
+    /// Generate a typed-input reply without opening the microphone/ASR pipeline.
+    async fn generate_text_response_stream(
+        &self,
+        _text: String,
+        _session_id: &str,
+        _frame_tx: mpsc::Sender<PlaybackEvent>,
+    ) -> Result<(), String> {
+        Err("当前响应策略不支持文字聊天".to_string())
+    }
+
     // ────────── VAD 端点检测（语音结束信号） ──────────
 
     /// 返回 VAD 端点通知器

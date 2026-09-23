@@ -27,6 +27,9 @@ it('保存 Codex 模型与强度，保留其他配置，并允许恢复默认', 
   }));
   render(<AgentSettings />);
   const model = await screen.findByLabelText('模型 ID');
+  fireEvent.change(screen.getByLabelText('工作空间目录'), {
+    target: { value: '~/projects/plain-folder' },
+  });
   fireEvent.change(model, { target: { value: 'custom-model' } });
   fireEvent.change(screen.getByLabelText('思考强度'), { target: { value: 'high' } });
   fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
@@ -38,6 +41,7 @@ it('保存 Codex 模型与强度，保留其他配置，并允许恢复默认', 
         codex: {
           ...settings.providers.codex,
           model: 'custom-model',
+          work_dir: '~/projects/plain-folder',
           model_reasoning_effort: 'high',
         },
       },
@@ -54,7 +58,11 @@ it('保存 Codex 模型与强度，保留其他配置，并允许恢复默认', 
       active_provider: 'codex',
       providers: {
         ...settings.providers,
-        codex: { ...settings.providers.codex, model: '', model_reasoning_effort: '' },
+        codex: {
+          ...settings.providers.codex,
+          model: '',
+          model_reasoning_effort: '',
+        },
       },
     }),
   );

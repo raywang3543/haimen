@@ -40,6 +40,12 @@ export const AGENT_PROVIDERS: ProviderInfo[] = [
     name: 'Codex CLI',
     fields: [
       {
+        key: 'work_dir',
+        label: '工作空间目录',
+        type: 'text',
+        placeholder: '留空使用网关工作目录，支持绝对路径或 ~/ 开头的路径',
+      },
+      {
         key: 'model',
         label: '模型 ID',
         type: 'text',

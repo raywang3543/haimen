@@ -1,0 +1,20 @@
+{
+  "session_id": "01a0cf18-ecc9-7f23-8c83-3bec94cc57f3",
+  "turn_id": "01a0cf1d-3aac-7091-a5dd-ddbd04fd155b",
+  "prompt": "帮我直接终止了这个进程。",
+  "git_status": [
+    " M crates/haimen-codex/src/agent.rs",
+    " M src/agents/registry.rs",
+    " D web-ui/dist/assets/index-CKEDg-jm.js",
+    " M web-ui/dist/index.html",
+    " M web-ui/src/data/agent-providers.ts",
+    " M web-ui/src/pages/Settings/AgentSettings.test.tsx",
+    "?? .codex/work-log/.state/session-01a0cf0a-71c6-7290-9090-5b09703986d1.json",
+    "?? .codex/work-log/.state/session-01a0cf18-ecc9-7f23-8c83-3bec94cc57f3.json",
+    "?? web-ui/dist/assets/index-35cV4LnQ.js",
+    "?? work-log/raw-2026-09-24.md"
+  ],
+  "workspace_root": "/Users/ray/projects/haimen",
+  "updated_at": "2026-09-24T00:33:40.137817+08:00",
+  "logged_turn_id": "01a0cf1d-3aac-7091-a5dd-ddbd04fd155b"
+}

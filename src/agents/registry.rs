@@ -151,6 +151,11 @@ fn builtin() -> AgentRegistry {
             let cli_path = resolve_cli_path(config, "codex", "codex");
             let sandbox = resolve_codex_sandbox(config);
             let fields = config.providers.get("codex");
+            let work_dir = fields
+                .and_then(|p| p.get("work_dir"))
+                .map(|path| path.trim())
+                .filter(|path| !path.is_empty())
+                .map(crate::gateway::chat_loop::expand_tilde);
             let model_config = CodexModelConfig::new(
                 fields.and_then(|p| p.get("model")).map(String::as_str),
                 fields
@@ -158,7 +163,9 @@ fn builtin() -> AgentRegistry {
                     .map(String::as_str),
             )?;
             Ok(Box::new(
-                CodexAgent::new(cli_path, sandbox).with_model_config(model_config),
+                CodexAgent::new(cli_path, sandbox)
+                    .with_model_config(model_config)
+                    .with_work_dir(work_dir),
             ))
         })
         .expect("内置 Agent codex 注册失败");

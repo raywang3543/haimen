@@ -69,6 +69,8 @@ pub struct CodexAgent {
     /// codex 沙箱策略（`codex exec --sandbox <mode>`），合法值：
     /// `read-only` / `workspace-write` / `danger-full-access`
     sandbox: String,
+    /// Optional Codex-specific workspace; otherwise use the gateway work directory.
+    work_dir: Option<String>,
 }
 
 impl CodexAgent {
@@ -78,11 +80,17 @@ impl CodexAgent {
             cli_path: cli_path.into(),
             model_config: CodexModelConfig::default(),
             sandbox: sandbox.into(),
+            work_dir: None,
         }
     }
 
     pub fn with_model_config(mut self, config: CodexModelConfig) -> Self {
         self.model_config = config;
+        self
+    }
+
+    pub fn with_work_dir(mut self, work_dir: Option<String>) -> Self {
+        self.work_dir = work_dir;
         self
     }
 
@@ -139,6 +147,9 @@ impl AgentProvider for CodexAgent {
         session_id: Option<&str>,
         work_dir: &str,
     ) -> Result<(TextStream, String, AgentEventStream), String> {
+        let work_dir = self.work_dir.as_deref().unwrap_or(work_dir);
+        std::fs::create_dir_all(work_dir)
+            .map_err(|e| format!("创建 Codex 工作目录失败 ({work_dir}): {e}"))?;
         let (stream, sid) = process_with_codex_stream(
             message,
             session_id,
@@ -381,6 +392,7 @@ fn build_codex_args(
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
+        "--skip-git-repo-check".to_string(),
         "--sandbox".to_string(),
         sandbox.to_string(),
     ];
@@ -606,6 +618,7 @@ mod tests {
             vec![
                 "exec".to_string(),
                 "--json".to_string(),
+                "--skip-git-repo-check".to_string(),
                 "--sandbox".to_string(),
                 "danger-full-access".to_string(),
                 "hello".to_string(),
@@ -630,6 +643,7 @@ mod tests {
             vec![
                 "exec".to_string(),
                 "--json".to_string(),
+                "--skip-git-repo-check".to_string(),
                 "--sandbox".to_string(),
                 "danger-full-access".to_string(),
                 "resume".to_string(),

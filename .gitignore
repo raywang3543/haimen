@@ -42,3 +42,6 @@ settings.local.json
 # AI Agent plans
 .agents/plans/
 tmp
+
+# Local Agent workspace (separate Git repository)
+/haimen-agent-workspace/

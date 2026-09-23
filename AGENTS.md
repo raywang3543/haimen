@@ -32,9 +32,7 @@ cargo run -- feishu chat list       # 列出飞书群聊
 cargo run -- feishu listen          # 监听飞书消息
 cargo run -- completion bash        # 生成 shell 补全
 
-# 安装 pre-commit 钩子（新 clone 后必须执行一次）
-npm install -g lefthook             # 安装 lefthook
-lefthook install                    # 注册 pre-commit 钩子
+# 本项目不运行提交钩子或 CI 质量检查；以下检查命令仅供按需手动使用。
 
 # 测试
 cargo test                          # 运行测试
@@ -70,7 +68,7 @@ cargo tarpaulin                     # 生成覆盖率报告
 
 ## 代码风格规范
 
-由 `cargo fmt` 和 `cargo clippy` 强制执行（Rust Edition 2024）：
+遵循 `cargo fmt` 和 `cargo clippy` 的风格约定（Rust Edition 2024），不自动强制检查：
 
 - **缩进**: 2 空格
 - **行宽**: 最大 100 字符

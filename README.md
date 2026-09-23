@@ -5,8 +5,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/shenjingnan/haimen/actions/workflows/ci.yml"><img src="https://github.com/shenjingnan/haimen/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://codecov.io/gh/shenjingnan/haimen"><img src="https://img.shields.io/codecov/c/github/shenjingnan/haimen" alt="Codecov"></a>
   <a href="https://crates.io/crates/haimen"><img src="https://img.shields.io/crates/v/haimen.svg?color=brightgreen" alt="crates.io"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-brightgreen.svg" alt="License: MIT"></a>
 </p>

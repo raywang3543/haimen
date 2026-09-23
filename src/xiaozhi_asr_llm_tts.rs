@@ -1442,6 +1442,102 @@ impl AsrLlmTtsStrategy {
 }
 
 impl AsrLlmTtsStrategy {
+    /// Text-only replies must bypass all audio work, including progress feedback
+    /// and the continuity pump (which otherwise emits encoded silence).
+    async fn respond_without_audio(
+        &self,
+        user_text: String,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+    ) -> Result<(), String> {
+        if frame_tx
+            .send(PlaybackEvent::Stt(user_text.clone()))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let fixed_text = {
+            let cfg = self.tts_config.read().unwrap();
+            cfg.fixed_text_enabled.then(|| {
+                cfg.fixed_text
+                    .clone()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "欢迎使用智能语音助手".to_string())
+            })
+        };
+        if let Some(text) = fixed_text {
+            let _ = frame_tx.send(PlaybackEvent::LlmSentence(text)).await;
+            return Ok(());
+        }
+
+        let start = std::time::Instant::now();
+        let agent = crate::gateway::agent_handle::snapshot(&self.agent);
+        let current_session = self.llm_session_at(agent.generation)?;
+        let mut full = String::new();
+        let mut events = Vec::new();
+        // Poll text and tool events together without spawning detached tasks.
+        // Dropping this future on abort also drops both streams.
+        let response = async {
+            let (mut stream, new_session, mut event_rx) = agent
+                .agent
+                .process_stream(&user_text, current_session.as_deref(), &self.work_dir)
+                .await?;
+            self.store_llm_session_at(new_session, agent.generation);
+            let mut pending = String::new();
+            let mut events_open = true;
+            loop {
+                tokio::select! {
+                    chunk = stream.next() => {
+                        let Some(chunk) = chunk else { break };
+                        full.push_str(&chunk);
+                        pending.push_str(&chunk);
+                        // Preserve whitespace/Markdown in display text; the TTS
+                        // sentence helper intentionally trims spoken sentences.
+                        while let Some(end) = pending.char_indices().find_map(|(i, ch)| {
+                            matches!(ch, '。' | '！' | '？' | '；' | '!' | '?' | ';' | '\n')
+                                .then_some(i + ch.len_utf8())
+                        }) {
+                            let rest = pending.split_off(end);
+                            let sentence = std::mem::replace(&mut pending, rest);
+                            frame_tx.send(PlaybackEvent::LlmSentence(sentence)).await
+                                .map_err(|_| "文字回复连接已关闭".to_string())?;
+                        }
+                    }
+                    event = event_rx.recv(), if events_open => {
+                        match event {
+                            Some(event) => events.push(event),
+                            None => events_open = false,
+                        }
+                    }
+                }
+            }
+            while let Ok(event) = event_rx.try_recv() {
+                events.push(event);
+            }
+            if !pending.is_empty() {
+                frame_tx
+                    .send(PlaybackEvent::LlmSentence(pending))
+                    .await
+                    .map_err(|_| "文字回复连接已关闭".to_string())?;
+            }
+            Ok::<(), String>(())
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(300), response)
+            .await
+            .unwrap_or_else(|_| Err("等待文字回复超时 (300s)".to_string()));
+        self.record_agent_log(
+            &user_text,
+            session_id,
+            Some(&full),
+            if result.is_ok() { "success" } else { "error" },
+            result.as_ref().err().map(String::as_str),
+            start.elapsed(),
+            events,
+        );
+        result
+    }
+
     /// Shared Agent/TTS path for recognized speech and typed input.
     async fn respond_to_text_stream(
         &self,
@@ -2286,6 +2382,40 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
     ) -> Result<(), String> {
         self.respond_to_text_stream(text, session_id, frame_tx)
             .await
+    }
+
+    async fn generate_response_stream_with_tts(
+        &self,
+        audio_buffer: Vec<AudioFrame>,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if tts_enabled {
+            return self
+                .generate_response_stream(audio_buffer, session_id, frame_tx)
+                .await;
+        }
+        if let Some(text) = self.resolve_user_text(&audio_buffer, session_id).await? {
+            self.respond_without_audio(text, session_id, frame_tx)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn generate_text_response_stream_with_tts(
+        &self,
+        text: String,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if tts_enabled {
+            self.respond_to_text_stream(text, session_id, frame_tx)
+                .await
+        } else {
+            self.respond_without_audio(text, session_id, frame_tx).await
+        }
     }
 
     /// 生成 ASR → LLM → TTS 响应
@@ -3421,6 +3551,86 @@ mod tests {
             shared,
             "/tmp".to_string(),
         )
+    }
+
+    #[tokio::test]
+    async fn muted_text_skips_unusable_tts_and_preserves_conversation() {
+        crate::test_util::run_with_temp_home_async(|_| async {
+            let strategy = make_strategy(Arc::new(MockAgent));
+            strategy.tts_config.write().unwrap().active_provider = "must-not-be-created".into();
+            for (input, expected) in [
+                ("你好！\n\n **尾句**", "你好！\n\n **尾句**"),
+                ("继续", "继续 (continued)"),
+            ] {
+                let (tx, mut rx) = mpsc::channel(16);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    strategy.generate_text_response_stream_with_tts(
+                        input.into(),
+                        "muted",
+                        tx,
+                        false,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let mut answer = String::new();
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        PlaybackEvent::Stt(text) => assert_eq!(text, input),
+                        PlaybackEvent::LlmSentence(text) => answer.push_str(&text),
+                        PlaybackEvent::Audio(_) => {
+                            panic!("Muted reply must not encode audio or silence")
+                        }
+                    }
+                }
+                assert_eq!(answer, expected);
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn muted_voice_uses_asr_text_without_tts() {
+        crate::test_util::run_with_temp_home_async(|_| async {
+            let strategy = make_strategy_with_pipeline(0);
+            strategy.tts_config.write().unwrap().active_provider = "must-not-be-created".into();
+            {
+                let mut state = strategy.streaming_state.lock().unwrap();
+                let state = state.as_mut().unwrap();
+                state.asr_handle.abort();
+                state.asr_handle = tokio::spawn(async { Ok("识别出的语音".to_string()) });
+            }
+            let (tx, mut rx) = mpsc::channel(16);
+            strategy.generate_response_stream_with_tts(Vec::new(), "muted", tx, false).await.unwrap();
+            assert!(matches!(rx.recv().await, Some(PlaybackEvent::Stt(text)) if text == "识别出的语音"));
+            assert!(matches!(rx.recv().await, Some(PlaybackEvent::LlmSentence(text)) if text == "识别出的语音"));
+            assert!(rx.recv().await.is_none());
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn muted_empty_and_failed_agent_replies_do_not_fall_back_to_audio() {
+        crate::test_util::run_with_temp_home_async(|_| async {
+            for agent in [
+                Arc::new(EmptyResponseAgent) as Arc<dyn AgentProvider>,
+                Arc::new(FailingAgent),
+            ] {
+                let failing = agent.name() == "failing-agent";
+                let strategy = make_strategy(agent);
+                strategy.tts_config.write().unwrap().active_provider = "must-not-be-created".into();
+                let (tx, mut rx) = mpsc::channel(16);
+                let result = strategy
+                    .generate_text_response_stream_with_tts("你好".into(), "muted", tx, false)
+                    .await;
+                assert_eq!(result.is_err(), failing);
+                while let Some(event) = rx.recv().await {
+                    assert!(!matches!(event, PlaybackEvent::Audio(_)));
+                }
+            }
+        })
+        .await;
     }
 
     // ─── Opus 编解码往返测试 ───────────────────────────

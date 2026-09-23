@@ -149,6 +149,35 @@ pub trait ResponseStrategy: Send + Sync {
         Err("当前响应策略不支持文字聊天".to_string())
     }
 
+    /// Per-turn output preference. Unsupported strategies fail without synthesizing.
+    async fn generate_response_stream_with_tts(
+        &self,
+        audio_buffer: Vec<AudioFrame>,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if !tts_enabled {
+            return Err("当前响应策略不支持纯文字回复".to_string());
+        }
+        self.generate_response_stream(audio_buffer, session_id, frame_tx)
+            .await
+    }
+
+    async fn generate_text_response_stream_with_tts(
+        &self,
+        text: String,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if !tts_enabled {
+            return Err("当前响应策略不支持纯文字回复".to_string());
+        }
+        self.generate_text_response_stream(text, session_id, frame_tx)
+            .await
+    }
+
     // ────────── VAD 端点检测（语音结束信号） ──────────
 
     /// 返回 VAD 端点通知器

@@ -19,6 +19,9 @@ pub enum ClientMessage {
     },
     Listen {
         state: ListenState,
+        /// Reply audio preference, snapshotted at listen/start.
+        #[serde(default = "default_tts_enabled")]
+        tts_enabled: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27,8 +30,17 @@ pub enum ClientMessage {
     /// Typed input; skips ASR and uses the existing Agent/TTS session.
     Text {
         text: String,
+        #[serde(default = "default_tts_enabled")]
+        tts_enabled: bool,
     },
-    Abort,
+    Abort {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
+}
+
+fn default_tts_enabled() -> bool {
+    true
 }
 
 fn default_transport() -> String {
@@ -39,6 +51,10 @@ fn default_transport() -> String {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    /// Sent after the final old-turn event, only for a correlated abort.
+    Aborted {
+        request_id: String,
+    },
     Hello {
         version: u32,
         transport: String,

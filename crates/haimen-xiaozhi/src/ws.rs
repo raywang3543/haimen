@@ -34,6 +34,7 @@ struct Session {
     recording_deadline: Option<Instant>,
     /// 响应策略：决定录音结束后如何生成回放音频
     strategy: Arc<dyn ResponseStrategy>,
+    tts_enabled: bool,
 }
 
 // ─── 公开 API ──────────────────────────────────────────────
@@ -74,6 +75,7 @@ async fn handle_ws_connection(
         cumulated_timestamp: 0,
         recording_deadline: None,
         strategy,
+        tts_enabled: true,
     };
 
     // ── HELLO 握手（30 秒超时） ──
@@ -194,7 +196,7 @@ async fn handle_ws_connection(
                     session.recording_deadline = None;
                     // 合成并播放「拜拜」（最长 5s）；失败/空帧则跳过播放，
                     // 但无论如何都要关闭连接结束这段无语音对话
-                    if let Some(frames) = session.strategy.goodbye_frames(&session.session_id).await {
+                    if let Some(frames) = if session.tts_enabled { session.strategy.goodbye_frames(&session.session_id).await } else { None } {
                         if !frames.is_empty() {
                             play_greeting_frames(&mut socket, &mut session, frames).await;
                         }
@@ -260,14 +262,22 @@ async fn handle_text_message(text: &str, socket: &mut WebSocket, session: &mut S
                     "Unexpected duplicate HELLO after handshake",
                 );
             }
-            ClientMessage::Listen { state, mode, text } => {
+            ClientMessage::Listen {
+                state,
+                mode,
+                text,
+                tts_enabled,
+            } => {
+                if state != ListenState::Stop {
+                    session.tts_enabled = tts_enabled;
+                }
                 handle_listen(state, mode, text, socket, session).await;
             }
-            ClientMessage::Text { text } => {
-                handle_typed_text(text, socket, session).await;
+            ClientMessage::Text { text, tts_enabled } => {
+                handle_typed_text(text, tts_enabled, socket, session).await;
             }
-            ClientMessage::Abort => {
-                handle_abort(socket, session).await;
+            ClientMessage::Abort { request_id } => {
+                handle_abort(socket, session, request_id).await;
             }
         },
         Err(e) => {
@@ -289,7 +299,12 @@ async fn handle_text_message(text: &str, socket: &mut WebSocket, session: &mut S
 }
 
 /// Typed turns share the cancellable streaming playback path with voice turns.
-async fn handle_typed_text(text: String, socket: &mut WebSocket, session: &mut Session) {
+async fn handle_typed_text(
+    text: String,
+    tts_enabled: bool,
+    socket: &mut WebSocket,
+    session: &mut Session,
+) {
     let text = text.trim();
     let error = if session.state != SessionState::Ready {
         Some(("invalid_state", "请等待当前对话结束再发送文字"))
@@ -309,6 +324,7 @@ async fn handle_typed_text(text: String, socket: &mut WebSocket, session: &mut S
         .await;
         return;
     }
+    session.tts_enabled = tts_enabled;
     session.audio_buffer.clear();
     session.recording_deadline = None;
     let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -317,7 +333,7 @@ async fn handle_typed_text(text: String, socket: &mut WebSocket, session: &mut S
     let text = text.to_string();
     let task = tokio::spawn(async move {
         strategy
-            .generate_text_response_stream(text, &session_id, tx)
+            .generate_text_response_stream_with_tts(text, &session_id, tx, tts_enabled)
             .await
     });
     playback_frames_stream(socket, session, rx, task).await;
@@ -346,7 +362,11 @@ async fn handle_listen(
             // 使用 play_greeting_frames（不监听中断）：设备唤醒后紧接着的
             // listen/start（录音轮）不会打断问候，会完整播完；设备消息
             // 留在 socket 缓冲中，播放结束后按序处理，用户语音不丢失。
-            if let Some(frames) = session.strategy.wake_greeting(&session.session_id).await {
+            if let Some(frames) = if session.tts_enabled {
+                session.strategy.wake_greeting(&session.session_id).await
+            } else {
+                None
+            } {
                 if !frames.is_empty() {
                     play_greeting_frames(socket, session, frames).await;
                 }
@@ -373,7 +393,7 @@ async fn handle_listen(
 // ─── Abort ─────────────────────────────────────────────────
 
 /// 处理 Abort 中断指令
-async fn handle_abort(socket: &mut WebSocket, session: &mut Session) {
+async fn handle_abort(socket: &mut WebSocket, session: &mut Session, request_id: Option<String>) {
     tracing::debug!(
         device_id = %session.device_id,
         "Abort — clearing buffer and stopping playback",
@@ -390,6 +410,13 @@ async fn handle_abort(socket: &mut WebSocket, session: &mut Session) {
     )
     .await;
     session.state = SessionState::Ready;
+    send_abort_ack(socket, request_id).await;
+}
+
+async fn send_abort_ack(socket: &mut WebSocket, request_id: Option<String>) {
+    if let Some(request_id) = request_id {
+        let _ = send_json(socket, &ServerMessage::Aborted { request_id }).await;
+    }
 }
 
 // ─── 录音状态迁移 ──────────────────────────────────────────
@@ -668,16 +695,18 @@ async fn strategy_playback(socket: &mut WebSocket, session: &mut Session) {
     session.recording_deadline = None;
     let buffer = std::mem::take(&mut session.audio_buffer);
 
-    if session.strategy.supports_streaming_playback() {
+    if session.strategy.supports_streaming_playback() || !session.tts_enabled {
         // ── 流式回放路径 ──
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<PlaybackEvent>(16);
         let strategy = session.strategy.clone();
         let session_id = session.session_id.clone();
 
+        let tts_enabled = session.tts_enabled;
+
         // 后台生成音频帧（中断时由 playback_frames_stream 内的守卫自动取消）
         let gen_handle = tokio::spawn(async move {
             strategy
-                .generate_response_stream(buffer, &session_id, frame_tx)
+                .generate_response_stream_with_tts(buffer, &session_id, frame_tx, tts_enabled)
                 .await
         });
 
@@ -770,9 +799,15 @@ async fn playback_frames_stream(
                                 }
                             }
                             PlaybackEvent::LlmSentence(text) => {
-                                pending_sentences.push(text.clone());
+                                if session.tts_enabled {
+                                    pending_sentences.push(text.clone());
+                                } else if !send_text_event(socket, session, &event).await {
+                                    session.state = SessionState::Ready;
+                                    return;
+                                }
                             }
                             PlaybackEvent::Audio(frame) => {
+                                if !session.tts_enabled { continue; }
                                 record_frame_arrival_gap(
                                     session,
                                     &mut last_frame_arrival,
@@ -808,8 +843,8 @@ async fn playback_frames_stream(
             message = socket.recv() => {
                 let interrupt = match message {
                     Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
-                        Ok(ClientMessage::Abort) => Some(PlaybackInterrupt::Abort),
-                        Ok(ClientMessage::Listen { state: ListenState::Start, .. }) => Some(PlaybackInterrupt::ListenStart),
+                        Ok(ClientMessage::Abort { request_id }) => Some(PlaybackInterrupt::Abort(request_id)),
+                        Ok(ClientMessage::Listen { state: ListenState::Start, tts_enabled, .. }) => Some(PlaybackInterrupt::ListenStart(tts_enabled)),
                         _ => None,
                     },
                     Some(Ok(Message::Close(_))) | None | Some(Err(_)) => Some(PlaybackInterrupt::Closed),
@@ -1103,9 +1138,9 @@ enum PlaybackInterrupt {
     /// 连接关闭
     Closed,
     /// 收到 `Abort` 指令
-    Abort,
+    Abort(Option<String>),
     /// 收到 `Listen::Start` 指令（中断播放并开始新一轮录音）
-    ListenStart,
+    ListenStart(bool),
 }
 
 /// 等待 60ms 帧间隔，同时监听设备中断信号
@@ -1122,9 +1157,9 @@ async fn wait_frame_interrupt(socket: &mut WebSocket) -> Option<PlaybackInterrup
             Some(Ok(Message::Text(text))) => {
                 if let Ok(cmd) = serde_json::from_str::<ClientMessage>(&text) {
                     match cmd {
-                        ClientMessage::Abort => Some(PlaybackInterrupt::Abort),
-                        ClientMessage::Listen { state: ListenState::Start, .. } => {
-                            Some(PlaybackInterrupt::ListenStart)
+                        ClientMessage::Abort { request_id } => Some(PlaybackInterrupt::Abort(request_id)),
+                        ClientMessage::Listen { state: ListenState::Start, tts_enabled, .. } => {
+                            Some(PlaybackInterrupt::ListenStart(tts_enabled))
                         }
                         // 其他消息（如 Listen::Stop/Detect）忽略，继续等待下一帧间隔
                         _ => None,
@@ -1187,9 +1222,9 @@ async fn wait_until_send_slot(
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(cmd) = serde_json::from_str::<ClientMessage>(&text) {
                         match cmd {
-                            ClientMessage::Abort => return Some(PlaybackInterrupt::Abort),
-                            ClientMessage::Listen { state: ListenState::Start, .. } => {
-                                return Some(PlaybackInterrupt::ListenStart);
+                            ClientMessage::Abort { request_id } => return Some(PlaybackInterrupt::Abort(request_id)),
+                            ClientMessage::Listen { state: ListenState::Start, tts_enabled, .. } => {
+                                return Some(PlaybackInterrupt::ListenStart(tts_enabled));
                             }
                             // 其他消息忽略，继续等待至发送时刻
                             _ => continue,
@@ -1265,19 +1300,21 @@ async fn handle_playback_interrupt(
     .await;
 
     match interrupt {
-        PlaybackInterrupt::ListenStart => {
+        PlaybackInterrupt::ListenStart(tts_enabled) => {
+            session.tts_enabled = tts_enabled;
             tracing::debug!(
                 device_id = %session.device_id,
                 "Playback interrupted by Listen::Start, entering recording",
             );
             enter_recording(session).await;
         }
-        PlaybackInterrupt::Abort => {
+        PlaybackInterrupt::Abort(request_id) => {
             tracing::debug!(
                 device_id = %session.device_id,
                 "Playback interrupted by Abort",
             );
             session.state = SessionState::Ready;
+            send_abort_ack(socket, request_id).await;
         }
         PlaybackInterrupt::Closed => {
             session.state = SessionState::Ready;
@@ -1334,6 +1371,7 @@ mod tests {
             cumulated_timestamp: 60,
             recording_deadline: Some(Instant::now()),
             strategy: Arc::new(EchoStrategy),
+            tts_enabled: true,
         }
     }
 

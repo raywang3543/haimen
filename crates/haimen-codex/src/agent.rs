@@ -19,6 +19,38 @@ use haimen_core::provider::{
 /// `[gateway.providers.codex] sandbox = "workspace-write"`。
 pub const DEFAULT_SANDBOX: &str = "danger-full-access";
 
+/// Optional per-provider overrides; absent values inherit Codex configuration.
+#[derive(Debug, Clone, Default)]
+pub struct CodexModelConfig {
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+impl CodexModelConfig {
+    pub fn new(model: Option<&str>, reasoning_effort: Option<&str>) -> Result<Self, String> {
+        let normalize = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let model = normalize(model);
+        let reasoning_effort = normalize(reasoning_effort);
+        if let Some(effort) = reasoning_effort.as_deref() {
+            if !matches!(
+                effort,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            ) {
+                return Err(format!("不支持的 Codex 思考强度: {effort}"));
+            }
+        }
+        Ok(Self {
+            model,
+            reasoning_effort,
+        })
+    }
+}
+
 /// Codex CLI Agent
 ///
 /// 通过 `codex exec --json` 子进程调用 Codex CLI 处理消息。
@@ -33,6 +65,7 @@ pub const DEFAULT_SANDBOX: &str = "danger-full-access";
 pub struct CodexAgent {
     /// codex CLI 可执行文件路径（默认 "codex"，由 build_command 按 PATH 查找）
     cli_path: String,
+    model_config: CodexModelConfig,
     /// codex 沙箱策略（`codex exec --sandbox <mode>`），合法值：
     /// `read-only` / `workspace-write` / `danger-full-access`
     sandbox: String,
@@ -43,8 +76,14 @@ impl CodexAgent {
     pub fn new(cli_path: impl Into<String>, sandbox: impl Into<String>) -> Self {
         Self {
             cli_path: cli_path.into(),
+            model_config: CodexModelConfig::default(),
             sandbox: sandbox.into(),
         }
+    }
+
+    pub fn with_model_config(mut self, config: CodexModelConfig) -> Self {
+        self.model_config = config;
+        self
     }
 
     /// 当前 CLI 路径（供测试断言使用）
@@ -100,9 +139,15 @@ impl AgentProvider for CodexAgent {
         session_id: Option<&str>,
         work_dir: &str,
     ) -> Result<(TextStream, String, AgentEventStream), String> {
-        let (stream, sid) =
-            process_with_codex_stream(message, session_id, work_dir, &self.cli_path, &self.sandbox)
-                .await?;
+        let (stream, sid) = process_with_codex_stream(
+            message,
+            session_id,
+            work_dir,
+            &self.cli_path,
+            &self.sandbox,
+            &self.model_config,
+        )
+        .await?;
         // codex 的 reasoning/tool 轨迹捕获留作后续，事件流为空（sender 立即 drop）
         let (_tx, rx) = tokio::sync::mpsc::channel::<AgentLogEvent>(64);
         Ok((stream, sid, rx))
@@ -127,8 +172,9 @@ async fn process_with_codex_stream(
     work_dir: &str,
     cli_path: &str,
     sandbox: &str,
+    model_config: &CodexModelConfig,
 ) -> Result<(TextStream, String), String> {
-    let args = build_codex_args(prompt, resume_session_id, sandbox);
+    let args = build_codex_args(prompt, resume_session_id, sandbox, model_config);
 
     tracing::debug!(args = ?args, "启动 codex 子进程");
 
@@ -326,13 +372,27 @@ async fn process_with_codex_stream(
 /// （`resume`）之前。**resume 会话同样需要 `--json`**——若缺失，codex 会把
 /// 完整会话转写输出到 stderr、最终答案以纯文本输出到 stdout，而非 JSONL
 /// 事件流，haimen 将无法提取 `thread_id` 与回复文本。
-fn build_codex_args(prompt: &str, resume_session_id: Option<&str>, sandbox: &str) -> Vec<String> {
+fn build_codex_args(
+    prompt: &str,
+    resume_session_id: Option<&str>,
+    sandbox: &str,
+    model_config: &CodexModelConfig,
+) -> Vec<String> {
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
         "--sandbox".to_string(),
         sandbox.to_string(),
     ];
+    if let Some(model) = &model_config.model {
+        args.extend(["--model".to_string(), model.clone()]);
+    }
+    if let Some(effort) = &model_config.reasoning_effort {
+        args.extend([
+            "--config".to_string(),
+            format!("model_reasoning_effort=\"{effort}\""),
+        ]);
+    }
     if let Some(sid) = resume_session_id {
         args.push("resume".to_string());
         args.push(sid.to_string());
@@ -500,9 +560,47 @@ mod tests {
     }
 
     #[test]
+    fn test_model_config_validation_and_inheritance() {
+        let blank = CodexModelConfig::new(Some("  "), Some(" ")).unwrap();
+        assert_eq!(
+            build_codex_args("hi", None, DEFAULT_SANDBOX, &blank),
+            build_codex_args("hi", None, DEFAULT_SANDBOX, &CodexModelConfig::default())
+        );
+        assert!(CodexModelConfig::new(None, Some("invalid")).is_err());
+        let model_only = CodexModelConfig::new(Some(" custom-model "), None).unwrap();
+        assert_eq!(model_only.model.as_deref(), Some("custom-model"));
+        assert!(model_only.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn test_model_overrides_for_new_and_resumed_sessions() {
+        let config = CodexModelConfig::new(Some(" custom-model "), Some(" high ")).unwrap();
+        for session in [None, Some("session-id")] {
+            let args = build_codex_args("hello", session, DEFAULT_SANDBOX, &config);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--model", "custom-model"])
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--config", "model_reasoning_effort=\"high\""])
+            );
+            assert_eq!(args.last().unwrap(), "hello");
+            if session.is_some() {
+                assert!(args.windows(2).any(|pair| pair == ["resume", "session-id"]));
+            }
+        }
+    }
+
+    #[test]
     fn test_build_codex_args_new_session() {
         // 新会话：选项在 prompt 之前，必须带 --json 与 --sandbox
-        let args = build_codex_args("hello", None, "danger-full-access");
+        let args = build_codex_args(
+            "hello",
+            None,
+            "danger-full-access",
+            &CodexModelConfig::default(),
+        );
         assert_eq!(
             args,
             vec![
@@ -521,7 +619,12 @@ mod tests {
         // haimen 将无法提取 thread_id（found_assistant_message=false）
         // 使用真实 codex thread_id 格式（UUID 风格），避免 typos 误判
         let thread_id = "019fd9cc-6b6a-7801-aec1-1984ac6da570";
-        let args = build_codex_args("continue", Some(thread_id), "danger-full-access");
+        let args = build_codex_args(
+            "continue",
+            Some(thread_id),
+            "danger-full-access",
+            &CodexModelConfig::default(),
+        );
         assert_eq!(
             args,
             vec![
@@ -542,7 +645,7 @@ mod tests {
 
     #[test]
     fn test_build_codex_args_custom_sandbox() {
-        let args = build_codex_args("hi", None, "workspace-write");
+        let args = build_codex_args("hi", None, "workspace-write", &CodexModelConfig::default());
         assert!(args.contains(&"workspace-write".to_string()));
         assert!(args.contains(&"--sandbox".to_string()));
     }

@@ -225,17 +225,42 @@ function AgentSettingsPanel() {
               {/* 可配置字段 */}
               {p.fields.map((field) => (
                 <div key={field.key} className="space-y-2">
-                  <span className="text-sm font-medium">{field.label}</span>
-                  <Input
-                    id={`agent-${p.id}-${field.key}`}
-                    type={field.type === 'password' ? 'password' : 'text'}
-                    autoComplete={field.type === 'password' ? 'new-password' : undefined}
-                    placeholder={field.placeholder ?? `输入${field.label}`}
-                    value={editState[p.id]?.[field.key] ?? ''}
-                    onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                  />
+                  <label htmlFor={`agent-${p.id}-${field.key}`} className="text-sm font-medium">
+                    {field.label}
+                  </label>
+                  {field.type === 'select' ? (
+                    <select
+                      id={`agent-${p.id}-${field.key}`}
+                      className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+                      value={editState[p.id]?.[field.key] ?? ''}
+                      onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                    >
+                      <option value="">跟随 Codex 默认</option>
+                      {field.options?.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <Input
+                      id={`agent-${p.id}-${field.key}`}
+                      type={field.type === 'password' ? 'password' : 'text'}
+                      autoComplete={field.type === 'password' ? 'new-password' : undefined}
+                      placeholder={field.placeholder ?? `输入${field.label}`}
+                      value={editState[p.id]?.[field.key] ?? ''}
+                      onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                    />
+                  )}
                 </div>
               ))}
+
+              {p.id === 'codex' && (
+                <p className="text-sm text-muted-foreground">
+                  模型和思考强度留空时使用 Codex 默认配置。可用强度取决于模型和 CLI
+                  版本；保存后下一条消息生效，会话将重置。
+                </p>
+              )}
 
               {/* 验证结果 */}
               {verifyResult && (

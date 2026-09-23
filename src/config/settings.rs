@@ -162,6 +162,9 @@ pub struct ConnectorsSection {
 /// # sandbox = "workspace-write"
 /// # 可选：codex CLI 可执行文件路径（留空按 PATH 查找 "codex"）
 /// # cli_path = "/opt/codex/bin/codex"
+/// # 可选：模型与思考强度，留空跟随 Codex 自身配置
+/// # model = "gpt-6-astra"
+/// # model_reasoning_effort = "high"
 ///
 /// [gateway.providers.openclaw]
 /// # CLI 工具无需额外凭证；建议 openclaw gateway 常驻（缺失时自动降级 embedded）

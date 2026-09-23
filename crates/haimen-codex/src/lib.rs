@@ -1,2 +1,2 @@
 pub mod agent;
-pub use agent::{CodexAgent, DEFAULT_SANDBOX};
+pub use agent::{CodexAgent, CodexModelConfig, DEFAULT_SANDBOX};

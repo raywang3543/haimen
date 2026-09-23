@@ -1,0 +1,23 @@
+{
+  "session_id": "01a0ce40-215d-79e0-bd20-e25005434917",
+  "turn_id": "01a0ce4a-9b6d-7b22-b1e5-cb8e65c16ed8",
+  "prompt": "重启 haimen 服务",
+  "git_status": [
+    " M crates/haimen-codex/src/agent.rs",
+    " M crates/haimen-codex/src/lib.rs",
+    " M src/agents/registry.rs",
+    " M src/config/settings.rs",
+    " M src/web/api/agent_settings.rs",
+    " D web-ui/dist/assets/index-BUjQ70EP.js",
+    " M web-ui/dist/index.html",
+    " M web-ui/src/data/agent-providers.ts",
+    " M web-ui/src/pages/Settings/AgentSettings.tsx",
+    " M work-log/raw-2026-09-23.md",
+    "?? .codex/work-log/.state/session-01a0ce40-215d-79e0-bd20-e25005434917.json",
+    "?? web-ui/dist/assets/index-CKEDg-jm.js",
+    "?? web-ui/src/pages/Settings/AgentSettings.test.tsx"
+  ],
+  "workspace_root": "/Users/ray/projects/haimen",
+  "updated_at": "2026-09-23T20:44:44.841567+08:00",
+  "logged_turn_id": "01a0ce4a-9b6d-7b22-b1e5-cb8e65c16ed8"
+}

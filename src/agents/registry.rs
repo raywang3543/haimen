@@ -12,7 +12,7 @@ use super::ollama::OllamaAgent;
 use crate::config::settings::GatewayConfig;
 use crate::gateway::provider::AgentProvider;
 use haimen_claude_code::ClaudeAgent;
-use haimen_codex::{CodexAgent, DEFAULT_SANDBOX};
+use haimen_codex::{CodexAgent, CodexModelConfig, DEFAULT_SANDBOX};
 use haimen_hermes::HermesAgent;
 use haimen_openclaw::{DEFAULT_AGENT_ID, OpenClawAgent};
 
@@ -150,7 +150,16 @@ fn builtin() -> AgentRegistry {
             // Codex 默认 workspace-write 会阻止子进程访问 macOS 钥匙串等系统资源
             let cli_path = resolve_cli_path(config, "codex", "codex");
             let sandbox = resolve_codex_sandbox(config);
-            Ok(Box::new(CodexAgent::new(cli_path, sandbox)))
+            let fields = config.providers.get("codex");
+            let model_config = CodexModelConfig::new(
+                fields.and_then(|p| p.get("model")).map(String::as_str),
+                fields
+                    .and_then(|p| p.get("model_reasoning_effort"))
+                    .map(String::as_str),
+            )?;
+            Ok(Box::new(
+                CodexAgent::new(cli_path, sandbox).with_model_config(model_config),
+            ))
         })
         .expect("内置 Agent codex 注册失败");
     registry
@@ -340,6 +349,17 @@ mod tests {
         .expect("注册成功");
         let agent = reg.build("cfg-agent", &test_config()).expect("构造成功");
         assert_eq!(agent.name(), "claude-code");
+    }
+
+    #[test]
+    fn test_codex_rejects_invalid_reasoning_effort() {
+        let mut config = test_config();
+        config.providers.insert(
+            "codex".into(),
+            HashMap::from([("model_reasoning_effort".into(), "invalid".into())]),
+        );
+        let error = registry().build("codex", &config).err().unwrap();
+        assert!(error.contains("思考强度"));
     }
 
     #[test]

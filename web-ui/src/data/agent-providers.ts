@@ -40,6 +40,19 @@ export const AGENT_PROVIDERS: ProviderInfo[] = [
     name: 'Codex CLI',
     fields: [
       {
+        key: 'model',
+        label: '模型 ID',
+        type: 'text',
+        placeholder: '留空跟随 Codex 默认，例如 gpt-6-astra',
+      },
+      {
+        key: 'model_reasoning_effort',
+        label: '思考强度',
+        type: 'select',
+        placeholder: '跟随 Codex 默认',
+        options: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      },
+      {
         key: 'cli_path',
         label: 'CLI 路径',
         type: 'text',

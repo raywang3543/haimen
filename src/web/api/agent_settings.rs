@@ -337,6 +337,8 @@ pub async fn verify_agent_credentials(
             "success": true,
             "data": { "valid": true, "message": if provider == "custom" {
                 "配置格式有效；服务连接和 API Key 将在发送消息时验证".to_string()
+            } else if provider == "codex" {
+                "Codex CLI 可用；模型权限和思考强度兼容性将在发送消息时验证".to_string()
             } else {
                 format!("{} 可用", agent.name())
             } }
@@ -420,6 +422,26 @@ mod tests {
         ) -> Result<(AgentOutput, String), String> {
             Ok((AgentOutput::default(), "mock-session".to_string()))
         }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_codex_effort_does_not_save_or_swap() {
+        run_with_temp_home_async(move |_home| async move {
+            let before = load_config();
+            let shared = crate::gateway::agent_handle::into_shared(Box::new(MockAgent));
+            let body = Json(serde_json::json!({
+                "active_provider": "codex",
+                "providers": {"codex": {"model_reasoning_effort": "invalid"}}
+            }));
+            let (status, payload) = update_agent_settings(State(shared.clone()), body)
+                .await
+                .expect_err("invalid effort must fail before checking CLI availability");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(payload.0["message"].as_str().unwrap().contains("思考强度"));
+            assert_eq!(load_config().gateway, before.gateway);
+            assert_eq!(crate::gateway::agent_handle::current_generation(&shared), 0);
+        })
+        .await;
     }
 
     #[tokio::test]

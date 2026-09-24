@@ -130,12 +130,26 @@ impl From<DingTalkConnectorConfig> for crate::connectors::dingtalk::config::Ding
     }
 }
 
+/// 公网中转服务连接器配置，haimen 作为 local 端主动连接。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RelayConnectorConfig {
+    pub enabled: bool,
+    /// 完整 WebSocket URL，例如 wss://relay.example.com/ws。
+    pub url: String,
+    /// 与中转服务 relay.toml 中的配对 ID 对应。
+    pub pair: String,
+    /// local_token；建议使用 ${env.RELAY_LOCAL_TOKEN} 引用。
+    pub token: String,
+}
+
 /// 所有连接器的统一容器
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ConnectorsSection {
     pub lark: Option<LarkConfig>,
     pub dingtalk: Option<DingTalkConnectorConfig>,
+    pub relay: Option<RelayConnectorConfig>,
 }
 
 /// AI 网关配置
@@ -1064,6 +1078,28 @@ client_secret = "${env.DINGTALK_CLIENT_SECRET}"
     }
 
     #[test]
+    fn test_load_settings_with_relay_connector() {
+        run_with_temp_home(|home| {
+            write_toml_settings(
+                home,
+                r#"
+[connectors.relay]
+enabled = true
+url = "wss://relay.example.com/ws"
+pair = "demo"
+token = "${env.RELAY_LOCAL_TOKEN}"
+"#,
+            );
+            let config = load_settings().unwrap().unwrap();
+            let relay = config.connectors.relay.unwrap();
+            assert!(relay.enabled);
+            assert_eq!(relay.url, "wss://relay.example.com/ws");
+            assert_eq!(relay.pair, "demo");
+            assert_eq!(relay.token, "${env.RELAY_LOCAL_TOKEN}");
+        });
+    }
+
+    #[test]
     fn test_connectors_section_all_disabled() {
         run_with_temp_home(|home| {
             write_toml_settings(
@@ -1137,6 +1173,7 @@ enabled = true
                     lark_cli_path: "my-lark".to_string(),
                 }),
                 dingtalk: None,
+                relay: None,
             },
             http: HttpServerConfig {
                 enabled: true,

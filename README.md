@@ -95,7 +95,7 @@ haimen uninstall
 
 ## 特性
 
-- **多消息渠道** — 集成飞书/Lark、钉钉、GitHub Webhook，统一消息模型
+- **多消息渠道** — 集成飞书/Lark、钉钉、Relay 中转、GitHub Webhook，统一消息模型
 - **多 AI 后端** — 支持 Claude Code、MCP 协议、OpenAI-compatible API
 - **小智 AI 硬件** — 原生支持 小智 AI 聊天硬件（WebSocket 音频流协议）
 - **Web 管理控制台** — 内置 HTTP 服务器 + React SPA，管理配置、Agent 和语音
@@ -118,6 +118,7 @@ haimen uninstall
 | ------------ | -------------- | ----------------------- |
 | 飞书 / Lark  | MessageChannel | lark-cli 子进程桥接     |
 | 钉钉         | MessageChannel | 直连 Web API            |
+| Relay 中转   | MessageChannel | 主动连接公网 WebSocket  |
 | GitHub       | WebhookHandler | Webhook + @mention 触发 |
 | 小智 AI 硬件 | WebSocket      | 音频流协议直连          |
 
@@ -192,6 +193,13 @@ lark_cli_path = "lark-cli"
 enabled = true
 client_id = "xxx"
 client_secret = "${env.DINGTALK_CLIENT_SECRET}"
+
+# 可选：通过独立 haimen-relay 服务接入设备
+[connectors.relay]
+enabled = true
+url = "wss://relay.example.com/ws"
+pair = "demo"
+token = "${env.RELAY_LOCAL_TOKEN}" # 对应中转服务的 local_token
 
 # AI 网关配置（支持多服务商）
 [gateway]

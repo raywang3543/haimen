@@ -15,6 +15,7 @@ use crate::agents::registry::registry;
 use crate::config::settings::load_settings;
 use crate::connectors::dingtalk::channel::DingTalkChannel;
 use crate::connectors::github::GitHubConnector;
+use crate::connectors::relay::RelayChannel;
 use crate::gateway::agent_handle::{build_shared_agent, current_agent};
 use crate::gateway::channel::MessageChannel;
 use crate::gateway::provider::AgentProvider;
@@ -48,6 +49,15 @@ pub fn build_connectors(
             channels.push((
                 "dingtalk".to_string(),
                 Box::new(DingTalkChannel::new(dingtalk_cfg)) as Box<dyn MessageChannel>,
+            ));
+        }
+    }
+
+    if let Some(relay_cfg) = &config.connectors.relay {
+        if relay_cfg.enabled {
+            channels.push((
+                "relay".to_string(),
+                Box::new(RelayChannel::new(relay_cfg.clone())) as Box<dyn MessageChannel>,
             ));
         }
     }
@@ -280,6 +290,14 @@ pub async fn start_all(cli_open_browser: bool) -> Result<(), String> {
                         .clone()
                         .ok_or_else(|| "DingTalk 配置不存在".to_string())?;
                     Box::new(DingTalkChannel::new(cfg.into())) as Box<dyn MessageChannel>
+                }
+                "relay" => {
+                    let cfg = config
+                        .connectors
+                        .relay
+                        .clone()
+                        .ok_or_else(|| "Relay 配置不存在".to_string())?;
+                    Box::new(RelayChannel::new(cfg)) as Box<dyn MessageChannel>
                 }
                 other => return Err(format!("不支持的连接器: {}", other)),
             };

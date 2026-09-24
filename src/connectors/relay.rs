@@ -63,6 +63,40 @@ pub struct RelayChannel {
     cancel: CancellationToken,
 }
 
+#[derive(Deserialize)]
+struct RelayCredentials {
+    pair: String,
+    token: String,
+}
+
+fn resolve_relay_value(value: &str, field: &str) -> Result<String, String> {
+    if let Some(reference) = value
+        .strip_prefix("${file:")
+        .and_then(|s| s.strip_suffix('}'))
+    {
+        let (path, key) = reference.rsplit_once('#').unwrap_or((reference, ""));
+        if path.is_empty() {
+            return Err("Relay 凭证文件路径不能为空".to_string());
+        }
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("读取 Relay 凭证文件 {path} 失败: {e}"))?;
+        if key.is_empty() {
+            return Ok(content.trim().to_string());
+        }
+        if key != field {
+            return Err(format!("Relay 凭证字段 {key} 无效，预期 {field}"));
+        }
+        let credentials: RelayCredentials = toml::from_str(&content)
+            .map_err(|e| format!("解析 Relay 凭证文件 {path} 失败: {e}"))?;
+        return match key {
+            "pair" => Ok(credentials.pair),
+            "token" => Ok(credentials.token),
+            _ => unreachable!(),
+        };
+    }
+    resolve_env_ref(value)
+}
+
 impl RelayChannel {
     pub fn new(config: RelayConnectorConfig) -> Self {
         Self {
@@ -73,8 +107,12 @@ impl RelayChannel {
         }
     }
 
+    fn resolved_pair(&self) -> Result<String, String> {
+        resolve_relay_value(&self.config.pair, "pair")
+    }
+
     fn resolved_token(&self) -> Result<String, String> {
-        resolve_env_ref(&self.config.token)
+        resolve_relay_value(&self.config.token, "token")
     }
 }
 
@@ -99,10 +137,11 @@ impl MessageChannel for RelayChannel {
             .as_str()
             .into_client_request()
             .map_err(|e| format!("Relay URL 无效: {e}"))?;
-        if self.config.pair.trim().is_empty() {
+        let pair = self.resolved_pair()?;
+        if pair.trim().is_empty() {
             return Err("Relay pair 不能为空".to_string());
         }
-        HeaderValue::from_str(&self.config.pair).map_err(|e| format!("Relay pair 无效: {e}"))?;
+        HeaderValue::from_str(&pair).map_err(|e| format!("Relay pair 无效: {e}"))?;
         let token = self.resolved_token()?;
         if token.is_empty() {
             return Err("Relay token 不能为空".to_string());
@@ -117,7 +156,7 @@ impl MessageChannel for RelayChannel {
         let (tx, rx) = mpsc::channel(128);
         tokio::spawn(run_connection_loop(
             self.config.url.clone(),
-            self.config.pair.clone(),
+            self.resolved_pair()?,
             self.resolved_token()?,
             self.outbound.clone(),
             self.peer_online.clone(),
@@ -325,6 +364,20 @@ mod tests {
     use axum::{Router, routing::get};
     use tokio::sync::Notify;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    #[test]
+    fn reads_token_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "pair = \"haimenrelay\"\ntoken = \"test-token\"\n").unwrap();
+        let channel = RelayChannel::new(RelayConnectorConfig {
+            pair: format!("${{file:{}#pair}}", path.display()),
+            token: format!("${{file:{}#token}}", path.display()),
+            ..RelayConnectorConfig::default()
+        });
+        assert_eq!(channel.resolved_pair().unwrap(), "haimenrelay");
+        assert_eq!(channel.resolved_token().unwrap(), "test-token");
+    }
 
     #[tokio::test]
     async fn receives_device_message_and_sends_reply() {

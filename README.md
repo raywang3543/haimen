@@ -198,8 +198,12 @@ client_secret = "${env.DINGTALK_CLIENT_SECRET}"
 [connectors.relay]
 enabled = true
 url = "wss://relay.example.com/ws"
-pair = "demo"
-token = "${env.RELAY_LOCAL_TOKEN}" # 对应中转服务的 local_token
+pair = "${file:./.env#pair}"
+token = "${file:./.env#token}"
+
+# 在项目根目录的 .env 中写入配对凭证（该文件已被 Git 忽略）：
+# pair = "haimenrelay"
+# token = "test1234"
 
 # AI 网关配置（支持多服务商）
 [gateway]

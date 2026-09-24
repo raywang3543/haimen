@@ -137,9 +137,9 @@ pub struct RelayConnectorConfig {
     pub enabled: bool,
     /// 完整 WebSocket URL，例如 wss://relay.example.com/ws。
     pub url: String,
-    /// 与中转服务 relay.toml 中的配对 ID 对应。
+    /// 与中转服务 relay.toml 中的配对 ID 对应；可从 ${file:./.env#pair} 读取。
     pub pair: String,
-    /// local_token；建议使用 ${env.RELAY_LOCAL_TOKEN} 引用。
+    /// local_token；可从 ${file:./.env#token} 读取。
     pub token: String,
 }
 

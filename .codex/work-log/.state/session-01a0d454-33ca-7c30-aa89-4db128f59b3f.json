@@ -1,0 +1,31 @@
+{
+  "session_id": "01a0d454-33ca-7c30-aa89-4db128f59b3f",
+  "turn_id": "01a0d493-9f31-7d82-abf3-3a616863bf7c",
+  "prompt": "帮我清理掉构建产物。",
+  "git_status": [
+    " M .gitignore",
+    " M Cargo.lock",
+    " M Cargo.toml",
+    " M README.md",
+    " M src/config/settings.rs",
+    " M src/lib.rs",
+    " M src/tts_factory.rs",
+    " M src/web/api/voice_settings.rs",
+    " M src/xiaozhi_asr_llm_tts.rs",
+    " M src/xiaozhi_asr_tts.rs",
+    " D web-ui/dist/assets/index-35cV4LnQ.js",
+    " M web-ui/dist/index.html",
+    " M web-ui/src/data/asr-providers.ts",
+    " M web-ui/src/data/tts-providers.ts",
+    " M web-ui/src/pages/Settings/VoiceSettings.tsx",
+    "?? .codex/work-log/.state/session-01a0d454-33ca-7c30-aa89-4db128f59b3f.json",
+    "?? src/edge_tts.rs",
+    "?? src/fixtures/edge_tts_48k.mp3",
+    "?? src/sensevoice_asr.rs",
+    "?? web-ui/dist/assets/index-BcBV7DVT.js",
+    "?? work-log/raw-2026-09-25.md"
+  ],
+  "workspace_root": "/Users/ray/projects/haimen",
+  "updated_at": "2026-09-25T02:01:39.334596+08:00",
+  "logged_turn_id": "01a0d493-9f31-7d82-abf3-3a616863bf7c"
+}

@@ -7,6 +7,7 @@ interface VoiceSelectorProps {
   voices: TtsVoice[];
   selectedVoice: string | null;
   onChange: (voiceId: string) => void;
+  placeholder?: string;
 }
 
 /** 模型显示名 */
@@ -15,7 +16,12 @@ const MODEL_LABEL: Record<string, string> = {
   'seed-tts-1.0': '豆包 TTS 1.0（seed-tts-1.0）',
 };
 
-export default function VoiceSelector({ voices, selectedVoice, onChange }: VoiceSelectorProps) {
+export default function VoiceSelector({
+  voices,
+  selectedVoice,
+  onChange,
+  placeholder = '选择音色（将自动匹配对应模型）...',
+}: VoiceSelectorProps) {
   // 按音色所属模型分组展示（豆包音色带 model 字段；其他提供商无则归入「其他」）
   const groups = useMemo(() => {
     const byModel = new Map<string, TtsVoice[]>();
@@ -42,7 +48,7 @@ export default function VoiceSelector({ voices, selectedVoice, onChange }: Voice
       groups={groups}
       value={selectedVoice}
       onChange={onChange}
-      placeholder="选择音色（将自动匹配对应模型）..."
+      placeholder={placeholder}
       searchPlaceholder="搜索音色..."
       emptyText="未找到匹配音色"
       showCount

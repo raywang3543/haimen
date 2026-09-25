@@ -17,6 +17,10 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_native_tts_helper();
+    }
+
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let web_dir = manifest_dir.join("web-ui");
     let dist_dir = web_dir.join("dist");
@@ -68,6 +72,26 @@ fn main() {
             }
         }
         Err(e) => fail_or_warn(&e.to_string(), &dist_dir, in_ci),
+    }
+}
+
+fn build_native_tts_helper() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_tts_helper.swift");
+    let output =
+        Path::new(&env::var("OUT_DIR").expect("OUT_DIR missing")).join("haimen-native-tts");
+    println!("cargo:rerun-if-changed={}", source.display());
+    let result = Command::new("swiftc")
+        .arg("-O")
+        .arg(&source)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("编译 macOS 原生 TTS 需要 Swift 编译器（swiftc）");
+    if !result.status.success() {
+        panic!(
+            "编译 macOS 原生 TTS 失败: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 }
 

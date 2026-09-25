@@ -16,12 +16,26 @@ export interface ProviderInfo {
   id: string;
   /** 显示名称 */
   name: string;
+  description?: string;
   /** 配置字段列表 */
   fields: ProviderField[];
 }
 
 /** 所有支持的 ASR 服务商 */
 export const ASR_PROVIDERS: ProviderInfo[] = [
+  {
+    id: 'sensevoice',
+    name: 'SenseVoice 本地',
+    description: '离线识别；录音结束后返回文本，本地音量检测负责判停。',
+    fields: [
+      {
+        key: 'model_dir',
+        label: '模型目录',
+        type: 'text',
+        placeholder: '默认：models/sensevoice-small-v1',
+      },
+    ],
+  },
   {
     id: 'doubao',
     name: '火山引擎',
@@ -33,11 +47,6 @@ export const ASR_PROVIDERS: ProviderInfo[] = [
         placeholder: '未设置，可用环境变量 DOUBAO_API_KEY',
       },
     ],
-  },
-  {
-    id: 'qwen',
-    name: '阿里通义千问',
-    fields: [{ key: 'api_key', label: 'API Key', type: 'password' }],
   },
 ];
 

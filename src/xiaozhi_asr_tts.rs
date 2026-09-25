@@ -34,6 +34,7 @@ use univoice::asr::{
 use univoice::tts::TtsRequest;
 
 use crate::config::settings::{AsrConfig, TtsConfig};
+use crate::sensevoice_asr::SenseVoiceAsr;
 
 use crate::xiaozhi_tts::pcm_to_opus_frames;
 
@@ -375,6 +376,9 @@ fn decode_opus_frames_to_pcm(
 /// 支持动态切换 ASR 提供商，通过 `AsrConfig.active_provider` 控制。
 fn create_asr_provider(cfg: &AsrConfig) -> Result<Box<dyn AsrProvider>, String> {
     match cfg.active_provider.as_str() {
+        "sensevoice" => Ok(Box::new(SenseVoiceAsr::new(
+            cfg.get_credential("model_dir").as_deref(),
+        )?)),
         "qwen" => {
             let api_key = cfg
                 .get_credential("api_key")

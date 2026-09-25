@@ -572,6 +572,13 @@ impl AsrConfig {
 ///
 /// [tts.providers.qwen]
 /// api_key = "..."
+///
+/// [tts.providers.edge_tts]
+/// voice = "zh-CN-XiaoxiaoNeural"
+/// rate = "+0%"
+/// volume = "+0%"
+/// pitch = "+0Hz"
+/// # proxy = "http://127.0.0.1:7890"
 /// ```
 ///
 /// # 向后兼容
@@ -772,6 +779,7 @@ impl TtsConfig {
             ("glm", "api_key") => std::env::var("GLM_API_KEY").ok(),
             ("openai", "api_key") => std::env::var("OPENAI_API_KEY").ok(),
             ("minimax", "api_key") => std::env::var("MINIMAX_API_KEY").ok(),
+            ("edge_tts", "proxy") => std::env::var("EDGE_TTS_PROXY").ok(),
             ("xfyun", "app_id") => std::env::var("XFYUN_APP_ID").ok(),
             ("xfyun", "api_key") => std::env::var("XFYUN_API_KEY").ok(),
             ("xfyun", "api_secret") => std::env::var("XFYUN_API_SECRET").ok(),
@@ -789,7 +797,11 @@ impl TtsConfig {
     /// 获取有效的音色（兼容旧接口，从当前激活提供商读取）
     pub fn resolved_voice(&self) -> String {
         self.get_credential("voice")
-            .unwrap_or_else(|| "zh_female_xiaohe_uranus_bigtts".to_string())
+            .unwrap_or_else(|| match self.active_provider.as_str() {
+                "edge_tts" => "zh-CN-XiaoxiaoNeural".to_string(),
+                "macos_native" => "com.apple.voice.premium.zh-CN.Yue".to_string(),
+                _ => "zh_female_xiaohe_uranus_bigtts".to_string(),
+            })
     }
 
     /// 获取有效的 Cluster（兼容旧接口，从当前激活提供商读取）

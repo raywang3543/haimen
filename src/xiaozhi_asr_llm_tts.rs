@@ -53,6 +53,7 @@ use univoice::tts::TtsRequest;
 
 use crate::config::settings::{AsrConfig, TtsConfig};
 use crate::gateway::provider::{AgentEventStream, AgentLogEvent};
+use crate::sensevoice_asr::SenseVoiceAsr;
 use crate::xiaozhi_tts::pcm_to_opus_frames;
 
 /// 共享 TTS 配置类型
@@ -489,6 +490,8 @@ struct AsrPipelineState {
     /// 无语音超时：录音开始后累计的初始静音帧数（60ms/帧，speech_detected 前才累计），
     /// 达到配置阈值时触发告别并关闭连接（不依赖 ASR 文本）
     no_speech_frames: u64,
+    /// 离线模型在录音结束前不会返回文本，判停只依赖本地能量检测。
+    offline_asr: bool,
 }
 
 /// LLM 会话记录：绑定产生它的 Agent 代数
@@ -582,6 +585,9 @@ fn compute_pcm_rms(pcm_bytes: &[u8]) -> f64 {
 /// 支持动态切换 ASR 提供商，通过 `AsrConfig.active_provider` 控制。
 fn create_asr_provider(cfg: &AsrConfig) -> Result<Box<dyn AsrProvider>, String> {
     match cfg.active_provider.as_str() {
+        "sensevoice" => Ok(Box::new(SenseVoiceAsr::new(
+            cfg.get_credential("model_dir").as_deref(),
+        )?)),
         "qwen" => {
             let api_key = cfg
                 .get_credential("api_key")
@@ -668,9 +674,10 @@ fn create_asr_provider(cfg: &AsrConfig) -> Result<Box<dyn AsrProvider>, String> 
 
 /// 根据配置创建流式 ASR 提供者实例（录音期间实时识别，含 VAD 参数）
 ///
-/// 注意：只有 doubao 支持流式 VAD 端点检测参数，其他提供商由服务端控制 VAD。
+/// 豆包使用服务端流式 VAD 参数；SenseVoice 在音频结束后识别，由本地能量检测判停。
 fn create_streaming_asr_provider(cfg: &AsrConfig) -> Result<Box<dyn AsrProvider>, String> {
     match cfg.active_provider.as_str() {
+        "sensevoice" => create_asr_provider(cfg),
         "qwen" => {
             let api_key = cfg
                 .get_credential("api_key")
@@ -1074,14 +1081,17 @@ impl AsrLlmTtsStrategy {
 
     /// 初始化流式 ASR 管道（惰性创建）
     ///
-    /// 创建 mpsc channel + Doubao ASR 实例 + Opus 解码器，
+    /// 创建 mpsc channel + ASR 实例 + Opus 解码器，
     /// 后台启动 `listen_stream` 消费 PCM 流并收集识别结果。
     /// 管道状态存入 `streaming_state` 供 `on_audio_frame` 喂入音频。
     async fn init_asr_pipeline(&self) -> Result<(), String> {
         // 从共享配置读取最新 ASR 凭证，动态创建流式 ASR 提供商实例
-        let asr = {
+        let (asr, offline_asr) = {
             let cfg = self.asr_config.read().unwrap();
-            create_streaming_asr_provider(&cfg)?
+            (
+                create_streaming_asr_provider(&cfg)?,
+                cfg.active_provider == "sensevoice",
+            )
         };
 
         // 创建 mpsc channel：接收端作为 AudioStream 喂给 ASR
@@ -1270,6 +1280,7 @@ impl AsrLlmTtsStrategy {
             silence_count: 0,
             speech_detected: false,
             no_speech_frames: 0,
+            offline_asr,
         };
 
         let mut guard = self
@@ -2284,11 +2295,10 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
             }
 
             if state.silence_count >= MAX_SILENCE_FRAMES
-                && self.asr_received_text.load(Ordering::Acquire)
+                && (state.offline_asr || self.asr_received_text.load(Ordering::Acquire))
             {
-                // 静音超阈值且 ASR 已经识别到过有效文本：关闭 ASR 流
-                // 如果 ASR 还未返回任何非空文本（用户还没说话），则不触发本地 VAD，
-                // 让系统继续等待（30s 安全超时兜底），避免用户正在思考时被提前中断
+                // 流式 Provider 已返回文字，或离线 Provider 已录到有效语音后，关闭 ASR 流。
+                // 其他 Provider 未返回文字时继续等待，避免口语停顿被提前截断。
                 let (new_tx, _) = mpsc::channel::<Vec<u8>>(1);
                 let _ = std::mem::replace(&mut state.pcm_tx, new_tx);
                 tracing::info!(
@@ -4026,6 +4036,28 @@ mod tests {
         assert_eq!(provider.name(), "qwen");
     }
 
+    #[test]
+    fn test_sensevoice_factory_uses_local_model_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model.int8.onnx"), []).unwrap();
+        std::fs::write(dir.path().join("tokens.txt"), []).unwrap();
+        let cfg = AsrConfig {
+            active_provider: "sensevoice".into(),
+            providers: std::collections::HashMap::from([(
+                "sensevoice".into(),
+                std::collections::HashMap::from([(
+                    "model_dir".into(),
+                    dir.path().to_string_lossy().into_owned(),
+                )]),
+            )]),
+        };
+        assert_eq!(create_asr_provider(&cfg).unwrap().name(), "sensevoice");
+        assert_eq!(
+            create_streaming_asr_provider(&cfg).unwrap().name(),
+            "sensevoice"
+        );
+    }
+
     // ─── take_sentence 句切分测试 ──────────────────────────
 
     #[test]
@@ -4544,6 +4576,7 @@ mod tests {
             silence_count: 0,
             speech_detected: false,
             no_speech_frames: 0,
+            offline_asr: false,
         };
         *strategy.streaming_state.lock().unwrap() = Some(state);
         strategy
@@ -4652,6 +4685,27 @@ mod tests {
             .await
             .is_ok();
         assert!(!fired, "检测到语音后无语音超时 Notify 不应被触发");
+    }
+
+    #[tokio::test]
+    async fn test_sensevoice_local_vad_ends_after_silence() {
+        let strategy = make_strategy_with_pipeline(0);
+        strategy
+            .streaming_state
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .offline_asr = true;
+        strategy.on_audio_frame(&loud_frame()).await.unwrap();
+        for _ in 0..MAX_SILENCE_FRAMES {
+            strategy.on_audio_frame(&silence_frame()).await.unwrap();
+        }
+        assert!(strategy.silence_closed.load(Ordering::Acquire));
+        let notify = strategy.vad_completion().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("离线 ASR 应通过本地静音判停");
     }
 
     #[tokio::test]

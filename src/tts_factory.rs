@@ -12,6 +12,11 @@ use univoice::tts::traits::TtsProvider;
 use univoice::tts::types::BaseTtsOption;
 
 use crate::config::settings::TtsConfig;
+use crate::edge_tts::EdgeTts;
+#[cfg(target_os = "macos")]
+use crate::native_tts::{
+    DEFAULT_DELAY, DEFAULT_PITCH, DEFAULT_RATE, DEFAULT_VOICE, DEFAULT_VOLUME, NativeTts,
+};
 
 /// 获取当前激活 TTS Provider 的默认音色
 fn default_voice(provider: &str) -> &'static str {
@@ -136,6 +141,38 @@ fn create_tts_provider_with_credentials(
                 sample_rate: Some(24000),
                 ..Default::default()
             })))
+        }
+        "edge_tts" => Ok(Box::new(EdgeTts::new(
+            get_credential("voice").unwrap_or_else(|| "zh-CN-XiaoxiaoNeural".to_string()),
+            get_credential("rate").unwrap_or_else(|| "+0%".to_string()),
+            get_credential("volume").unwrap_or_else(|| "+0%".to_string()),
+            get_credential("pitch").unwrap_or_else(|| "+0Hz".to_string()),
+            get_credential("proxy"),
+        )?)),
+        "macos_native" => {
+            #[cfg(target_os = "macos")]
+            {
+                let float_value = |key: &str, default: f64| -> Result<f64, String> {
+                    match get_credential(key) {
+                        Some(value) => value
+                            .parse::<f64>()
+                            .map_err(|_| format!("macOS 原生 TTS 的 {key} 必须是数字")),
+                        None => Ok(default),
+                    }
+                };
+                Ok(Box::new(NativeTts::new(
+                    get_credential("voice").unwrap_or_else(|| DEFAULT_VOICE.into()),
+                    float_value("rate", DEFAULT_RATE as f64)? as f32,
+                    float_value("pitch", DEFAULT_PITCH as f64)? as f32,
+                    float_value("volume", DEFAULT_VOLUME as f64)? as f32,
+                    float_value("pre_delay", DEFAULT_DELAY)?,
+                    float_value("post_delay", DEFAULT_DELAY)?,
+                )?))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err("macOS 原生 TTS 仅支持 macOS".into())
+            }
         }
         _ => Err(format!("不支持的 TTS 提供商: {}", active)),
     }

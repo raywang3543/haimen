@@ -1,4 +1,6 @@
 /target
+# 本地 ASR 模型较大，部署时自行放置
+/models/
 
 # Web UI 前端构建产物（web-ui/dist/）已提交入库：
 #  - crates.io 包直接嵌入提交的产物，cargo install 无需 Node

@@ -262,6 +262,11 @@ api_key = "${env.DOUBAO_API_KEY}"
 [asr.providers.qwen]
 api_key = "${env.QWEN_API_KEY}"
 
+# 可选：使用项目下 models/sensevoice-small-v1 的本地离线模型
+# 该目录需包含 model.int8.onnx 和 tokens.txt
+[asr.providers.sensevoice]
+# model_dir = "/absolute/path/to/sensevoice-small-v1"  # 模型放在其他位置时设置
+
 # TTS 配置（小智硬件，支持多服务商）
 [tts]
 active_provider = "doubao"
@@ -278,6 +283,8 @@ model = "tts-1"
 [tts.providers.edge]
 voice = "zh-CN-XiaoxiaoNeural"
 ```
+
+使用本地 SenseVoice 时，将 `[asr].active_provider` 设为 `"sensevoice"`，或在 Web 控制台的 ASR 页面选择「SenseVoice 本地」并设为首选。默认读取项目 `models/sensevoice-small-v1/`；服务从其他目录运行或模型放在别处时，请在 `model_dir` 中填写绝对路径。该模型是整段识别，录音由本地音量检测判停，录音结束后返回识别文本；模型文件需自行放置，不随 haimen 二进制提供。
 
 ## 通过 API 切换首选 Agent
 

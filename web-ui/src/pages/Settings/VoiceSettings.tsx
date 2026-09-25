@@ -80,7 +80,11 @@ function AsrSettingsPanel() {
       const data = await getAsrSettings();
       setEditState(data.providers ?? {});
       setActiveProvider(data.active_provider ?? 'doubao');
-      setSelectedTab(data.active_provider ?? 'doubao');
+      setSelectedTab(
+        ASR_PROVIDERS.some((provider) => provider.id === data.active_provider)
+          ? data.active_provider
+          : 'sensevoice',
+      );
       setLoading(false);
     } catch {
       setError('加载 ASR 配置失败');
@@ -151,7 +155,7 @@ function AsrSettingsPanel() {
 
   const handleVerify = async () => {
     const creds = editState[selectedTab] ?? {};
-    if (!Object.values(creds).some((v) => v.length > 0)) return;
+    if (selectedTab !== 'sensevoice' && !Object.values(creds).some((v) => v.length > 0)) return;
 
     setVerifying(true);
     try {
@@ -238,16 +242,27 @@ function AsrSettingsPanel() {
                 )}
               </div>
 
+              {p.description && <p className="text-sm text-muted-foreground">{p.description}</p>}
+
               {/* 动态字段 */}
               {p.fields.map((field) => (
                 <div key={field.key} className="space-y-2">
                   <span className="text-sm font-medium">{field.label}</span>
-                  <PasswordInput
-                    id={`asr-${p.id}-${field.key}`}
-                    placeholder={field.placeholder ?? `输入${field.label}`}
-                    value={editState[p.id]?.[field.key] ?? ''}
-                    onChange={(v) => handleFieldChange(field.key, v)}
-                  />
+                  {field.type === 'password' ? (
+                    <PasswordInput
+                      id={`asr-${p.id}-${field.key}`}
+                      placeholder={field.placeholder ?? `输入${field.label}`}
+                      value={editState[p.id]?.[field.key] ?? ''}
+                      onChange={(v) => handleFieldChange(field.key, v)}
+                    />
+                  ) : (
+                    <Input
+                      id={`asr-${p.id}-${field.key}`}
+                      placeholder={field.placeholder ?? `输入${field.label}`}
+                      value={editState[p.id]?.[field.key] ?? ''}
+                      onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                    />
+                  )}
                 </div>
               ))}
 
@@ -264,9 +279,12 @@ function AsrSettingsPanel() {
                 <Button
                   variant="outline"
                   onClick={handleVerify}
-                  disabled={verifying || !p.fields.some((f) => editState[p.id]?.[f.key])}
+                  disabled={
+                    verifying ||
+                    (p.id !== 'sensevoice' && !p.fields.some((f) => editState[p.id]?.[f.key]))
+                  }
                 >
-                  {verifying ? '验证中...' : '验证凭证'}
+                  {verifying ? '验证中...' : p.id === 'sensevoice' ? '验证模型' : '验证凭证'}
                 </Button>
                 <Button onClick={handleSave} disabled={saving}>
                   {saving ? '保存中...' : '保存配置'}
@@ -331,7 +349,11 @@ function TtsSettingsPanel() {
       setNoSpeechGoodbye(data.no_speech_goodbye ?? '');
       setNoSpeechTimeoutSecs((data.no_speech_timeout_ms ?? 10000) / 1000);
       setActiveProvider(data.active_provider ?? 'doubao');
-      setSelectedTab(data.active_provider ?? 'doubao');
+      setSelectedTab(
+        TTS_PROVIDERS.some((provider) => provider.id === data.active_provider)
+          ? data.active_provider
+          : 'macos_native',
+      );
       // 音色列表由下方 effect（依赖 selectedTab / currentModel）加载
     } catch {
       setError('加载 TTS 配置失败');
@@ -349,6 +371,8 @@ function TtsSettingsPanel() {
   // 选择音色时自动设置对应的 resource_id，无需用户手动切换模型。
   useEffect(() => {
     let cancelled = false;
+    setVoices([]);
+    if (selectedTab !== 'doubao' && selectedTab !== 'macos_native') return;
     listTtsVoices(selectedTab)
       .then((list) => {
         if (cancelled) return;
@@ -431,7 +455,12 @@ function TtsSettingsPanel() {
 
   const handleVerify = async () => {
     const creds = editState[selectedTab] ?? {};
-    if (!Object.values(creds).some((v) => v.length > 0)) return;
+    if (
+      selectedTab !== 'edge_tts' &&
+      selectedTab !== 'macos_native' &&
+      !Object.values(creds).some((v) => v.length > 0)
+    )
+      return;
 
     setVerifying(true);
     try {
@@ -519,57 +548,71 @@ function TtsSettingsPanel() {
               </div>
 
               {/* 动态字段 */}
-              {p.fields.map((field) => (
-                <div key={field.key} className="space-y-2">
-                  <span className="text-sm font-medium">{field.label}</span>
-                  {field.type === 'select' && field.options ? (
-                    <Combobox
-                      options={field.options.map((opt) => ({ value: opt, label: opt }))}
-                      value={editState[p.id]?.[field.key] ?? null}
-                      onChange={(v) => handleFieldChange(field.key, v)}
-                      placeholder={field.placeholder ?? '请选择...'}
-                    />
-                  ) : field.type === 'text' ? (
-                    <Input
-                      id={`tts-${p.id}-${field.key}`}
-                      type="text"
-                      placeholder={field.placeholder ?? `输入${field.label}`}
-                      value={editState[p.id]?.[field.key] ?? ''}
-                      onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                    />
-                  ) : (
-                    <PasswordInput
-                      id={`tts-${p.id}-${field.key}`}
-                      placeholder={field.placeholder ?? `输入${field.label}`}
-                      value={editState[p.id]?.[field.key] ?? ''}
-                      onChange={(v) => handleFieldChange(field.key, v)}
-                    />
-                  )}
-                </div>
-              ))}
+              {p.fields
+                .filter((field) => field.type !== 'voice')
+                .map((field) => (
+                  <div key={field.key} className="space-y-2">
+                    <span className="text-sm font-medium">{field.label}</span>
+                    {field.type === 'select' && field.options ? (
+                      <Combobox
+                        options={field.options.map((opt) => ({ value: opt, label: opt }))}
+                        value={editState[p.id]?.[field.key] ?? null}
+                        onChange={(v) => handleFieldChange(field.key, v)}
+                        placeholder={field.placeholder ?? '请选择...'}
+                      />
+                    ) : field.type === 'text' || field.type === 'number' ? (
+                      <Input
+                        id={`tts-${p.id}-${field.key}`}
+                        type={field.type}
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        placeholder={field.placeholder ?? `输入${field.label}`}
+                        value={editState[p.id]?.[field.key] ?? field.defaultValue ?? ''}
+                        onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                      />
+                    ) : (
+                      <PasswordInput
+                        id={`tts-${p.id}-${field.key}`}
+                        placeholder={field.placeholder ?? `输入${field.label}`}
+                        value={editState[p.id]?.[field.key] ?? ''}
+                        onChange={(v) => handleFieldChange(field.key, v)}
+                      />
+                    )}
+                  </div>
+                ))}
 
               {/* 音色选择器（仅当前选中 Tab 展示） */}
-              {p.id === selectedTab && voices.length > 0 && (
-                <div className="space-y-2">
-                  <span className="text-sm font-medium" id="tts-voice-label">
-                    TTS 音色
-                  </span>
-                  <div>
-                    <VoiceSelector
-                      voices={voices}
-                      selectedVoice={editState[p.id]?.voice ?? null}
-                      onChange={(voiceId) => {
-                        handleFieldChange('voice', voiceId);
-                        // 音色决定模型：选择音色时自动把 resource_id 设为该音色所属模型
-                        const voice = voices.find((v) => v.id === voiceId);
-                        if (voice?.model) {
-                          handleFieldChange('resource_id', voice.model);
+              {p.id === selectedTab &&
+                (p.id === 'doubao' || p.id === 'macos_native') &&
+                voices.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium" id="tts-voice-label">
+                      TTS 音色
+                    </span>
+                    <div>
+                      <VoiceSelector
+                        voices={voices}
+                        selectedVoice={
+                          editState[p.id]?.voice ??
+                          p.fields.find((field) => field.key === 'voice')?.defaultValue ??
+                          null
                         }
-                      }}
-                    />
+                        placeholder={
+                          p.id === 'macos_native' ? '选择这台 Mac 已安装的音色...' : undefined
+                        }
+                        onChange={(voiceId) => {
+                          handleFieldChange('voice', voiceId);
+                          // 音色决定模型：选择音色时自动把 resource_id 设为该音色所属模型
+                          const voice = voices.find((v) => v.id === voiceId);
+                          if (voice?.model) {
+                            handleFieldChange('resource_id', voice.model);
+                          }
+                        }}
+                      />
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
               {/* 验证结果 */}
               {verifyResult && (
@@ -584,9 +627,18 @@ function TtsSettingsPanel() {
                 <Button
                   variant="outline"
                   onClick={handleVerify}
-                  disabled={verifying || !p.fields.some((f) => editState[p.id]?.[f.key])}
+                  disabled={
+                    verifying ||
+                    (p.id !== 'edge_tts' &&
+                      p.id !== 'macos_native' &&
+                      !p.fields.some((f) => editState[p.id]?.[f.key]))
+                  }
                 >
-                  {verifying ? '验证中...' : '验证凭证'}
+                  {verifying
+                    ? '验证中...'
+                    : p.id === 'edge_tts' || p.id === 'macos_native'
+                      ? '测试合成'
+                      : '验证凭证'}
                 </Button>
                 <Button onClick={handleSave} disabled={saving}>
                   {saving ? '保存中...' : '保存配置'}

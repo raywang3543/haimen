@@ -136,6 +136,10 @@ univoice = { version = "0.1.6", features = ["opus-encoder"] }
 opus2 = { workspace = true }
 webbrowser = { workspace = true }
 local-ip-address = { workspace = true }
+tempfile = { workspace = true }
+which = { workspace = true }
+symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
+sherpa-onnx = "1.13.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -6,8 +6,12 @@ pub mod commands;
 pub mod config;
 pub mod connectors;
 pub mod datetime;
+pub mod edge_tts;
 pub mod gateway;
 pub mod logging;
+#[cfg(target_os = "macos")]
+pub mod native_tts;
+pub mod sensevoice_asr;
 pub mod tts_factory;
 pub mod web;
 pub mod xiaozhi_asr_llm_tts;

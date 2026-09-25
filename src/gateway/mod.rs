@@ -81,7 +81,7 @@ pub fn build_agent(
 /// 固定文本模式（`tts.fixed_text_enabled = true`）会保留 ASR 流式管线用于 VAD 判停，
 /// 但跳过 LLM 处理，直接使用预设文本进行 TTS 合成。
 ///
-/// 需要配置 ASR 和 TTS 提供商凭证。环境变量缺失时跳过 xiaozhi 路由（不挂载）。
+/// 云端 ASR 需要凭证；本地 SenseVoice 无需凭证。
 ///
 /// ASR 配置通过 Arc<RwLock> 共享，Web API 保存时同步更新此对象，实现运行时热加载。
 /// Agent 使用共享句柄，Web API 切换时同步更新，实现运行时热切换。
@@ -91,23 +91,13 @@ fn build_xiaozhi_strategy(
     shared_asr_config: crate::xiaozhi_asr_llm_tts::SharedAsrConfig,
     shared_tts_config: crate::xiaozhi_asr_llm_tts::SharedTtsConfig,
 ) -> Option<Arc<dyn haimen_xiaozhi::ResponseStrategy>> {
-    // 检查 ASR 凭证（所有模式都需要 ASR 用于 VAD 判停）
+    // 检查 ASR 配置（所有模式都需要 ASR 用于 VAD 判停）
     {
         let cfg = shared_asr_config.read().unwrap();
-        let has_creds = match cfg.active_provider.as_str() {
-            "doubao" => cfg.get_credential("api_key").is_some(),
-            "xfyun" => {
-                cfg.get_credential("app_id").is_some()
-                    && cfg.get_credential("api_key").is_some()
-                    && cfg.get_credential("api_secret").is_some()
-            }
-            // qwen / glm / mimo 等使用 api_key
-            _ => cfg.get_credential("api_key").is_some(),
-        };
-        if !has_creds {
+        if !asr_is_configured(&cfg) {
             tracing::info!(
                 provider = %cfg.active_provider,
-                "未配置 ASR 凭证，xiaozhi WebSocket 不启动",
+                "ASR 配置不完整，xiaozhi WebSocket 不启动",
             );
             return None;
         }
@@ -123,6 +113,19 @@ fn build_xiaozhi_strategy(
             work_dir,
         ),
     ))
+}
+
+fn asr_is_configured(cfg: &crate::config::settings::AsrConfig) -> bool {
+    match cfg.active_provider.as_str() {
+        "sensevoice" => true,
+        "xfyun" => {
+            cfg.get_credential("app_id").is_some()
+                && cfg.get_credential("api_key").is_some()
+                && cfg.get_credential("api_secret").is_some()
+        }
+        // 豆包、通义千问、智谱和小米等云端提供商使用 API Key。
+        _ => cfg.get_credential("api_key").is_some(),
+    }
 }
 
 /// 从 AppConfig 解析工作目录
@@ -440,4 +443,25 @@ pub async fn start_echo() -> Result<(), String> {
     }
 
     Err("所有消息流意外结束".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::asr_is_configured;
+    use crate::config::settings::AsrConfig;
+
+    #[test]
+    fn local_sensevoice_does_not_need_api_key_to_mount_websocket() {
+        let cfg = AsrConfig {
+            active_provider: "sensevoice".into(),
+            ..Default::default()
+        };
+        assert!(asr_is_configured(&cfg));
+
+        let cloud_cfg = AsrConfig {
+            active_provider: "doubao".into(),
+            ..Default::default()
+        };
+        assert!(!asr_is_configured(&cloud_cfg));
+    }
 }

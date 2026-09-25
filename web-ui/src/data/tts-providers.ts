@@ -6,11 +6,16 @@ export interface ProviderField {
   /** 界面显示标签 */
   label: string;
   /** 输入类型 */
-  type: 'password' | 'text' | 'select';
+  type: 'password' | 'text' | 'select' | 'number' | 'voice';
   /** 空值时的占位提示 */
   placeholder?: string;
   /** select 类型的选项列表 */
   options?: string[];
+  /** 未保存配置时展示并使用的默认值 */
+  defaultValue?: string;
+  min?: number;
+  max?: number;
+  step?: number;
 }
 
 export interface ProviderInfo {
@@ -25,6 +30,72 @@ export interface ProviderInfo {
 /** 所有支持的 TTS 服务商 */
 export const TTS_PROVIDERS: ProviderInfo[] = [
   {
+    id: 'macos_native',
+    name: 'macOS 原生 TTS',
+    fields: [
+      {
+        key: 'voice',
+        label: '音色',
+        type: 'voice',
+        defaultValue: 'com.apple.voice.premium.zh-CN.Yue',
+      },
+      {
+        key: 'rate',
+        label: '语速（0–1）',
+        type: 'number',
+        defaultValue: '0.5',
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: 'pitch',
+        label: '音调倍率（0.5–2）',
+        type: 'number',
+        defaultValue: '1.0',
+        min: 0.5,
+        max: 2,
+        step: 0.01,
+      },
+      {
+        key: 'volume',
+        label: '音量（0–1）',
+        type: 'number',
+        defaultValue: '1.0',
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: 'pre_delay',
+        label: '朗读前停顿（秒）',
+        type: 'number',
+        defaultValue: '0',
+        min: 0,
+        step: 0.1,
+      },
+      {
+        key: 'post_delay',
+        label: '朗读后停顿（秒）',
+        type: 'number',
+        defaultValue: '0',
+        min: 0,
+        step: 0.1,
+      },
+    ],
+  },
+  {
+    id: 'edge_tts',
+    name: '本地 Edge TTS',
+    fields: [
+      { key: 'voice', label: '音色', type: 'text', placeholder: 'zh-CN-XiaoxiaoNeural' },
+      { key: 'rate', label: '语速', type: 'text', placeholder: '+0%' },
+      { key: 'volume', label: '音量', type: 'text', placeholder: '+0%' },
+      { key: 'pitch', label: '音调', type: 'text', placeholder: '+0Hz' },
+      { key: 'proxy', label: '代理（可选）', type: 'text', placeholder: 'http://127.0.0.1:7890' },
+    ],
+  },
+  {
     id: 'doubao',
     name: '火山引擎',
     fields: [
@@ -33,48 +104,6 @@ export const TTS_PROVIDERS: ProviderInfo[] = [
         label: 'API Key',
         type: 'password',
         placeholder: '未设置，可用环境变量 DOUBAO_API_KEY',
-      },
-    ],
-  },
-  {
-    id: 'qwen',
-    name: '阿里通义千问',
-    fields: [
-      { key: 'api_key', label: 'API Key', type: 'password' },
-      {
-        key: 'model',
-        label: '模型',
-        type: 'select',
-        placeholder: 'cosyvoice-v3-flash',
-        options: ['cosyvoice-v1', 'cosyvoice-v2', 'cosyvoice-v3-flash', 'cosyvoice-v3-plus'],
-      },
-    ],
-  },
-  {
-    id: 'glm',
-    name: '智谱AI',
-    fields: [{ key: 'api_key', label: 'API Key', type: 'password' }],
-  },
-  {
-    id: 'minimax',
-    name: 'MiniMax',
-    fields: [
-      { key: 'api_key', label: 'API Key', type: 'password' },
-      {
-        key: 'model',
-        label: '模型',
-        type: 'select',
-        placeholder: 'speech-2.8-hd',
-        options: [
-          'speech-2.8-hd',
-          'speech-2.6-hd',
-          'speech-2.6-turbo',
-          'speech-2.5-turbo',
-          'speech-02-hd',
-          'speech-02',
-          'speech-01-hd',
-          'speech-01',
-        ],
       },
     ],
   },

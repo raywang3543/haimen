@@ -23,6 +23,7 @@ use axum::{Json, extract::Query, extract::State, http::StatusCode};
 use crate::config::settings::AppConfig;
 use crate::config::settings::AsrConfig;
 use crate::config::settings::TtsConfig;
+use crate::sensevoice_asr::SenseVoiceAsr;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 工具函数
@@ -153,6 +154,7 @@ pub async fn update_asr_settings(
 /// - doubao: `api_key`
 /// - qwen / glm / mimo: `api_key`
 /// - xfyun: `app_id` + `api_key` + `api_secret`
+/// - sensevoice: 可选 `model_dir`，不填写时读取项目下的默认模型目录
 pub async fn verify_asr_credentials(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
@@ -162,6 +164,30 @@ pub async fn verify_asr_credentials(
         .unwrap_or("doubao");
 
     match provider {
+        "sensevoice" => {
+            let model_dir = body
+                .get("model_dir")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let result = tokio::task::spawn_blocking(move || {
+                let model = SenseVoiceAsr::new(model_dir.as_deref())?;
+                model.verify_model()?;
+                Ok::<_, String>(model.model_dir().display().to_string())
+            })
+            .await;
+            let data = match result {
+                Ok(Ok(path)) => serde_json::json!({
+                    "valid": true,
+                    "message": format!("SenseVoice 模型加载成功：{path}")
+                }),
+                Ok(Err(error)) => serde_json::json!({ "valid": false, "message": error }),
+                Err(error) => serde_json::json!({
+                    "valid": false,
+                    "message": format!("SenseVoice 模型验证失败: {error}")
+                }),
+            };
+            Ok(Json(serde_json::json!({ "success": true, "data": data })))
+        }
         "doubao" => verify_doubao(&body).await,
         "qwen" => {
             verify_http_key(
@@ -539,6 +565,30 @@ pub async fn list_tts_voices(params: Query<HashMap<String, String>>) -> Json<ser
 
     let model = params.get("model").map(String::as_str);
 
+    if provider == "macos_native" {
+        #[cfg(target_os = "macos")]
+        {
+            let voices = crate::native_tts::NativeTts::available_voices()
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "读取 macOS 原生音色失败");
+                    Vec::new()
+                });
+            return Json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "provider": provider,
+                    "model": null,
+                    "voices": voices.iter().map(|voice| serde_json::json!({
+                        "id": voice.id,
+                        "name": voice.name,
+                        "language": voice.language,
+                    })).collect::<Vec<_>>(),
+                }
+            }));
+        }
+    }
+
     let (voices, resp_model, is_doubao) = match provider {
         "doubao" => {
             let list = univoice::tts::voices::doubao::list_voices();
@@ -595,6 +645,8 @@ pub async fn verify_tts_credentials(
         .unwrap_or("doubao");
 
     match provider {
+        "edge_tts" => verify_edge_tts(&body).await,
+        "macos_native" => verify_native_tts(&body).await,
         "doubao" => verify_tts_doubao(&body).await,
         "qwen" => {
             verify_http_key(
@@ -660,6 +712,92 @@ pub async fn verify_tts_credentials(
             "data": { "valid": false, "message": format!("暂不支持验证 {} 提供商", provider) }
         }))),
     }
+}
+
+async fn verify_native_tts(
+    body: &serde_json::Value,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use univoice::tts::TtsRequest;
+
+    let mut config = TtsConfig {
+        active_provider: "macos_native".into(),
+        ..Default::default()
+    };
+    let fields = body
+        .as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter_map(|(key, value)| {
+            if key == "provider" {
+                None
+            } else {
+                value.as_str().map(|value| (key.clone(), value.to_string()))
+            }
+        })
+        .collect();
+    config.providers.insert("macos_native".into(), fields);
+    let result = match crate::tts_factory::create_tts_provider(&config) {
+        Ok(provider) => provider
+            .synthesize(TtsRequest {
+                text: "你好".into(),
+                options: None,
+            })
+            .await
+            .map(|response| !response.audio.is_empty())
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error),
+    };
+    let (valid, message) = match result {
+        Ok(true) => (true, "macOS 原生 TTS 合成成功".to_string()),
+        Ok(false) => (false, "macOS 原生 TTS 返回空音频".to_string()),
+        Err(error) => (false, format!("macOS 原生 TTS 验证失败: {error}")),
+    };
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "valid": valid, "message": message }
+    })))
+}
+
+async fn verify_edge_tts(
+    body: &serde_json::Value,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    use univoice::tts::{TtsProvider, TtsRequest};
+
+    let field = |key: &str, default: &str| {
+        body.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .unwrap_or(default)
+            .to_string()
+    };
+    let result = match crate::edge_tts::EdgeTts::new(
+        field("voice", "zh-CN-XiaoxiaoNeural"),
+        field("rate", "+0%"),
+        field("volume", "+0%"),
+        field("pitch", "+0Hz"),
+        body.get("proxy")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+    ) {
+        Ok(tts) => tts
+            .synthesize(TtsRequest {
+                text: "你好".into(),
+                options: None,
+            })
+            .await
+            .map(|audio| audio.audio),
+        Err(error) => Err(univoice::tts::error::TtsError::Other(error)),
+    };
+    let (valid, message) = match result {
+        Ok(audio) if !audio.is_empty() => (true, "本地 edge-tts 合成成功".to_string()),
+        Ok(_) => (false, "edge-tts 返回空音频".to_string()),
+        Err(error) => (false, format!("edge-tts 验证失败: {error}")),
+    };
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "data": { "valid": valid, "message": message }
+    })))
 }
 
 /// 用提供的凭证调用 Doubao TTS 合成测试音频验证有效性

@@ -353,6 +353,7 @@ fn parse_device_message(payload: Value, pair: &str) -> Option<Message> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "device".to_string()),
         content: payload.text,
+        images: Vec::new(),
         timestamp: Utc::now(),
         channel: "relay".to_string(),
     })

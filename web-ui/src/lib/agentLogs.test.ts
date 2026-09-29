@@ -5,7 +5,7 @@ import { formatTime, groupByChat, prettyJson, todayStr, UNGROUPED } from './agen
 function makeRecord(overrides: Partial<AgentLogRecord> & { timestamp: string }): AgentLogRecord {
   return {
     source: 'gateway',
-    agent: 'claude-code',
+    agent: 'codex',
     connector: null,
     chat_id: 'chat-1',
     sender_id: null,

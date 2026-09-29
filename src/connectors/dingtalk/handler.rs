@@ -199,6 +199,7 @@ pub fn try_parse_message(
         conversation_id: session_key,
         sender_id,
         content,
+        images: Vec::new(),
         timestamp: Utc::now(),
         channel: "dingtalk".to_string(),
     })

@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use haimen_core::ImageData;
 use serde::Serialize;
 use tokio::sync::Mutex as AsyncMutex;
 
+use super::image::{ImageUrlShape, user_content};
 use crate::gateway::provider::{AgentOutput, AgentProvider};
 
 const MAX_MESSAGES: usize = 40;
@@ -16,7 +18,7 @@ const SESSION_TTL: Duration = Duration::from_secs(60 * 60);
 #[derive(Clone, Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
+    content: serde_json::Value,
 }
 
 struct Session {
@@ -91,31 +93,19 @@ impl CustomAgent {
         sessions.insert(id.clone(), session.clone());
         (id, session)
     }
-}
 
-#[async_trait]
-impl AgentProvider for CustomAgent {
-    fn name(&self) -> &str {
-        "custom"
-    }
-
-    async fn check_available(&self) -> Result<(), String> {
-        // 兼容服务未必实现 /models；验证字段格式，实际请求由 process 检查。
-        Ok(())
-    }
-
-    async fn process(
+    async fn process_content(
         &self,
-        message: &str,
+        text: &str,
+        content: serde_json::Value,
         session_id: Option<&str>,
-        _work_dir: &str,
     ) -> Result<(AgentOutput, String), String> {
         let (id, session) = self.session(session_id);
         let mut session = session.lock().await;
         let mut messages = session.messages.clone();
         messages.push(ChatMessage {
             role: "user",
-            content: message.to_string(),
+            content,
         });
 
         let response = self
@@ -138,14 +128,16 @@ impl AgentProvider for CustomAgent {
             .json()
             .await
             .map_err(|e| format!("自定义 Agent 响应解析失败: {e}"))?;
-        let text = body
+        let answer = body
             .pointer("/choices/0/message/content")
             .and_then(|v| v.as_str())
             .ok_or("自定义 Agent 响应缺少 choices[0].message.content")?
             .to_string();
+        // 历史只保存文本，避免每轮重传 base64 图片并占用大量内存。
+        messages.last_mut().unwrap().content = serde_json::Value::String(text.to_string());
         messages.push(ChatMessage {
             role: "assistant",
-            content: text.clone(),
+            content: serde_json::Value::String(answer.clone()),
         });
         if messages.len() > MAX_MESSAGES {
             messages.drain(..messages.len() - MAX_MESSAGES);
@@ -154,11 +146,52 @@ impl AgentProvider for CustomAgent {
         session.touched = Instant::now();
         Ok((
             AgentOutput {
-                text,
+                text: answer,
                 events: Vec::new(),
             },
             id,
         ))
+    }
+}
+
+#[async_trait]
+impl AgentProvider for CustomAgent {
+    fn name(&self) -> &str {
+        "custom"
+    }
+
+    async fn check_available(&self) -> Result<(), String> {
+        // 兼容服务未必实现 /models；验证字段格式，实际请求由 process 检查。
+        Ok(())
+    }
+
+    async fn process(
+        &self,
+        message: &str,
+        session_id: Option<&str>,
+        _work_dir: &str,
+    ) -> Result<(AgentOutput, String), String> {
+        self.process_content(
+            message,
+            user_content(message, &[], ImageUrlShape::Object)?,
+            session_id,
+        )
+        .await
+    }
+
+    async fn process_with_images(
+        &self,
+        message: &str,
+        images: &[ImageData],
+        session_id: Option<&str>,
+        _work_dir: &str,
+    ) -> Result<(AgentOutput, String), String> {
+        self.process_content(
+            message,
+            user_content(message, images, ImageUrlShape::Object)?,
+            session_id,
+        )
+        .await
     }
 }
 
@@ -194,12 +227,27 @@ mod tests {
         assert_eq!(first.text, "回答");
         let (_, resumed_sid) = agent.process("第二句", Some(&sid), ".").await.unwrap();
         assert_eq!(sid, resumed_sid);
+        let image = ImageData {
+            mime_type: "image/png".to_string(),
+            data_base64: "aW1hZ2U=".to_string(),
+        };
+        agent
+            .process_with_images("看图", &[image], Some(&sid), ".")
+            .await
+            .unwrap();
+        agent.process("继续", Some(&sid), ".").await.unwrap();
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         assert_eq!(requests[0]["model"], "test-model");
         assert_eq!(requests[0]["stream"], false);
         assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 3);
         assert_eq!(requests[1]["messages"][1]["content"], "回答");
+        assert_eq!(requests[2]["messages"][4]["content"][0]["text"], "看图");
+        assert_eq!(
+            requests[2]["messages"][4]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aW1hZ2U="
+        );
+        assert_eq!(requests[3]["messages"][4]["content"], "看图");
         server.abort();
     }
 

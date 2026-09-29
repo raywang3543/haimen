@@ -3,6 +3,8 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+use crate::ImageData;
+
 /// 流式文本：Agent 逐块输出的文本流
 pub type TextStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 
@@ -50,7 +52,7 @@ pub type AgentEventStream = tokio::sync::mpsc::Receiver<AgentLogEvent>;
 
 /// AI Agent 抽象
 ///
-/// 所有 Agent 实现（Claude CLI、MCP Client、OpenAI 等）实现此 trait。
+/// 所有 Agent 实现（Codex CLI、OpenClaw、Ollama、Custom）实现此 trait。
 /// - process() 处理消息，支持会话 resume，返回完整输出（文本 + 内容轨迹）
 /// - process_stream() 流式处理消息，逐块返回文本（默认实现回退到 process()）
 #[async_trait]
@@ -70,6 +72,21 @@ pub trait AgentProvider: Send + Sync {
         session_id: Option<&str>,
         work_dir: &str,
     ) -> Result<(AgentOutput, String), String>;
+
+    /// 处理带图片的消息。未实现视觉输入的 Agent 必须明确拒绝。
+    async fn process_with_images(
+        &self,
+        message: &str,
+        images: &[ImageData],
+        session_id: Option<&str>,
+        work_dir: &str,
+    ) -> Result<(AgentOutput, String), String> {
+        if images.is_empty() {
+            self.process(message, session_id, work_dir).await
+        } else {
+            Err(format!("{} Agent 暂不支持图片输入", self.name()))
+        }
+    }
 
     /// 流式处理消息
     ///

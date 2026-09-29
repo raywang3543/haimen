@@ -45,7 +45,7 @@ export interface ConnectorConfig {
 
 export interface AgentConfig {
   name: string;
-  type: 'claude_code' | 'mcp';
+  type: 'ollama' | 'custom' | 'codex' | 'openclaw';
   enabled: boolean;
   [key: string]: unknown;
 }

@@ -10,10 +10,8 @@ describe('getAgentProviders', () => {
       success: true,
       data: {
         providers: [
-          { id: 'hermes', display_name: 'Hermes' },
           { id: 'custom', display_name: '自定义 Agent' },
           { id: 'ollama', display_name: 'Ollama' },
-          { id: 'claude-code', display_name: 'Claude Code' },
           { id: 'codex', display_name: 'Codex CLI' },
           { id: 'openclaw', display_name: 'OpenClaw' },
         ],

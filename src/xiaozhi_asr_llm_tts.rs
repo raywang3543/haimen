@@ -1,7 +1,7 @@
 //! xiaozhi-esp32 ASR → LLM → TTS 响应策略
 //!
 //! 将设备录制的 Opus 音频解码为 PCM，通过 Doubao ASR 识别为文字，
-//! 将文字发送给 AI Agent（Claude Code / Codex 等）处理，
+//! 将文字发送给 AI Agent（Codex CLI / OpenClaw 等）处理，
 //! 再将 LLM 的回复通过 Doubao TTS 合成为语音，编码为 Opus 帧后发送给设备播放。
 //!
 //! # 管线
@@ -12,7 +12,7 @@
 //! PCM16 mono 16000Hz
 //!   ↓ DoubaoAsr::listen_stream
 //! 识别文本
-//!   ↓ AgentProvider::process (Claude Code / Codex 等)
+//!   ↓ AgentProvider::process (Codex CLI / OpenClaw 等)
 //! LLM 回复文本
 //!   ↓ DoubaoTts::synthesize(format="pcm")
 //! PCM16 mono 24000Hz
@@ -523,7 +523,7 @@ pub struct AsrLlmTtsStrategy {
     tts_config: SharedTtsConfig,
     /// CLI 音色覆盖（--xiaozhi-tts-voice），叠加到共享配置之上，不写入磁盘
     voice_override: Option<String>,
-    /// AI Agent（Claude Code、Codex 等）
+    /// AI Agent（Codex CLI、OpenClaw 等）
     ///
     /// 使用共享句柄实现运行时热切换：Web UI 切换 Agent 时更新此共享对象，
     /// 策略在每次调用时读取当前生效的 Agent。

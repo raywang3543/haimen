@@ -238,7 +238,7 @@ mod tests {
         AgentLogRecord {
             timestamp: crate::datetime::iso_timestamp_now(),
             source: source.to_string(),
-            agent: "claude-code".to_string(),
+            agent: "codex".to_string(),
             connector: Some("lark".to_string()),
             chat_id: Some(chat.to_string()),
             sender_id: Some("user_1".to_string()),

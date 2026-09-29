@@ -160,13 +160,7 @@ pub struct ConnectorsSection {
 ///
 /// ```toml
 /// [gateway]
-/// active_provider = "claude-code"
-///
-/// [gateway.providers.claude-code]
-/// # CLI 工具无需额外凭证
-/// # 可选：claude CLI 可执行文件路径（留空按 PATH 查找 "claude"；填绝对路径或
-/// # 自定义命令名）。适用于 CLI 未装在标准 PATH 的环境。
-/// # cli_path = "/opt/claude/bin/claude"
+/// active_provider = "codex"
 ///
 /// [gateway.providers.codex]
 /// # CLI 工具无需额外凭证
@@ -187,11 +181,6 @@ pub struct ConnectorsSection {
 /// # 可选：openclaw CLI 可执行文件路径（留空按 PATH 查找 "openclaw"）
 /// # cli_path = "/opt/openclaw/bin/openclaw"
 ///
-/// [gateway.providers.hermes]
-/// # CLI 工具无需额外凭证
-/// # 可选：hermes CLI 可执行文件路径（留空按 PATH 查找 "hermes"）
-/// # cli_path = "/opt/hermes/bin/hermes"
-///
 /// [gateway.providers.ollama]
 /// model_id = "qwen3:8b"
 /// # 可选：Ollama 服务地址（默认 http://localhost:11434）
@@ -206,7 +195,7 @@ pub struct ConnectorsSection {
 ///
 /// # 向后兼容
 ///
-/// 旧格式 `agent = "claude-code"` 在加载时自动迁移到 `active_provider = "claude-code"`。
+/// 旧格式 `agent = "codex"` 在加载时自动迁移到 `active_provider = "codex"`。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GatewayConfig {
     /// 当前激活的 AI Agent 提供商
@@ -221,7 +210,7 @@ pub struct GatewayConfig {
     /// 模型名称
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// 默认工作目录（Claude Code session 绑定到此目录）
+    /// 默认工作目录（Agent 会话绑定到此目录）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_dir: Option<String>,
     /// 会话空闲超时（分钟），超过此时间无消息自动切新会话，默认 30
@@ -230,9 +219,6 @@ pub struct GatewayConfig {
     /// 会话最大轮次，达到后自动切新会话，默认 20
     #[serde(default = "default_session_max_turns")]
     pub session_max_turns: u32,
-    /// MCP 服务器配置（haimen 作为客户端连接）
-    #[serde(default)]
-    pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Agent 处理超时秒数，超过此时间未返回则放弃并继续处理下一条消息
     /// 默认 300 秒（5 分钟）
     #[serde(default = "default_agent_timeout")]
@@ -240,7 +226,7 @@ pub struct GatewayConfig {
 }
 
 fn default_agent_provider() -> String {
-    "claude-code".to_string()
+    "codex".to_string()
 }
 
 fn default_session_idle_timeout() -> u64 {
@@ -265,7 +251,6 @@ impl Default for GatewayConfig {
             work_dir: None,
             session_idle_timeout_mins: default_session_idle_timeout(),
             session_max_turns: default_session_max_turns(),
-            mcp_servers: HashMap::new(),
             agent_timeout_secs: default_agent_timeout(),
         }
     }
@@ -314,7 +299,6 @@ struct GatewayConfigLegacy {
     work_dir: Option<String>,
     session_idle_timeout_mins: Option<u64>,
     session_max_turns: Option<u32>,
-    mcp_servers: Option<HashMap<String, McpServerConfig>>,
     agent_timeout_secs: Option<u64>,
 }
 
@@ -339,15 +323,14 @@ impl<'de> Deserialize<'de> for GatewayConfig {
                 session_max_turns: legacy
                     .session_max_turns
                     .unwrap_or_else(default_session_max_turns),
-                mcp_servers: legacy.mcp_servers.unwrap_or_default(),
                 agent_timeout_secs: legacy
                     .agent_timeout_secs
                     .unwrap_or_else(default_agent_timeout),
             });
         }
 
-        // 旧格式迁移：agent = "claude-code" → active_provider
-        let active_provider = legacy.agent.unwrap_or_else(|| "claude-code".to_string());
+        // 旧格式迁移：agent → active_provider
+        let active_provider = legacy.agent.unwrap_or_else(default_agent_provider);
 
         Ok(Self {
             active_provider,
@@ -361,7 +344,6 @@ impl<'de> Deserialize<'de> for GatewayConfig {
             session_max_turns: legacy
                 .session_max_turns
                 .unwrap_or_else(default_session_max_turns),
-            mcp_servers: legacy.mcp_servers.unwrap_or_default(),
             agent_timeout_secs: legacy
                 .agent_timeout_secs
                 .unwrap_or_else(default_agent_timeout),
@@ -383,37 +365,6 @@ impl GatewayConfig {
             .filter(|v| !v.is_empty())
             .cloned()
     }
-}
-
-/// MCP 服务器配置
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct McpServerConfig {
-    /// 连接类型: stdio
-    #[serde(default = "default_mcp_type")]
-    pub r#type: String,
-    /// 可执行文件路径
-    pub command: String,
-    /// 启动参数
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 描述
-    #[serde(default)]
-    pub description: String,
-}
-
-impl Default for McpServerConfig {
-    fn default() -> Self {
-        Self {
-            r#type: default_mcp_type(),
-            command: String::new(),
-            args: Vec::new(),
-            description: String::new(),
-        }
-    }
-}
-
-fn default_mcp_type() -> String {
-    "stdio".to_string()
 }
 
 /// ASR（语音识别）配置
@@ -1157,7 +1108,7 @@ enabled = true
         assert_eq!(config.log_level, "info");
         assert!(config.connectors.lark.is_none());
         assert!(config.connectors.dingtalk.is_none());
-        assert_eq!(config.gateway.active_provider, "claude-code");
+        assert_eq!(config.gateway.active_provider, "codex");
         assert!(config.http.enabled);
         assert_eq!(config.asr.active_provider, "doubao");
         assert!(config.asr.providers.is_empty());
@@ -1176,7 +1127,7 @@ enabled = true
             debug: true,
             log_level: "warn".to_string(),
             gateway: GatewayConfig {
-                active_provider: "claude-code".to_string(),
+                active_provider: "codex".to_string(),
                 ..Default::default()
             },
             connectors: ConnectorsSection {
@@ -1222,7 +1173,7 @@ enabled = true
     #[test]
     fn test_gateway_config_default() {
         let config = GatewayConfig::default();
-        assert_eq!(config.active_provider, "claude-code");
+        assert_eq!(config.active_provider, "codex");
         assert_eq!(config.session_idle_timeout_mins, 30);
         assert_eq!(config.session_max_turns, 20);
     }
@@ -1261,11 +1212,11 @@ enabled = true
                 home,
                 r#"
 [gateway]
-agent = "claude-code"
+agent = "codex"
 "#,
             );
             let result = load_settings().unwrap().unwrap();
-            assert_eq!(result.gateway.active_provider, "claude-code");
+            assert_eq!(result.gateway.active_provider, "codex");
         });
     }
 
@@ -1343,7 +1294,7 @@ extra = "value"
                 r#"
 [gateway]
 active_provider = "codex"
-agent = "claude-code"
+agent = "openclaw"
 "#,
             );
             let result = load_settings().unwrap().unwrap();
@@ -1839,7 +1790,7 @@ app_key = "old-key"
     fn test_agent_log_config_missing_section_uses_default() {
         run_with_temp_home(|home| {
             // 无 [agent_log] 节 → 默认开启
-            write_toml_settings(home, "[gateway]\nactive_provider = \"claude-code\"\n");
+            write_toml_settings(home, "[gateway]\nactive_provider = \"codex\"\n");
             let cfg = load_settings().unwrap().unwrap();
             assert!(cfg.agent_log.enabled);
             assert_eq!(cfg.agent_log.retention_days, 30);

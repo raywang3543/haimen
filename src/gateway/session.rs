@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use haimen_core::ImageData;
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing;
@@ -9,8 +10,8 @@ pub type SessionKey = String;
 /// 单个会话信息
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
-    /// Claude Code 返回的 session_id
-    pub claude_session_id: String,
+    /// Agent 返回的 session_id
+    pub agent_session_id: String,
     /// 工作目录（session 绑定到目录）
     pub cwd: String,
     /// 创建时间
@@ -23,6 +24,8 @@ pub struct SessionInfo {
     pub max_turns: u32,
     /// 创建该会话时的 Agent 代数；与当前代数不一致视为失效
     pub agent_gen: u64,
+    /// 最近一次成功发送的最后一张图片，供同一会话的追问继续引用
+    pub last_images: Vec<ImageData>,
 }
 
 impl SessionInfo {
@@ -49,7 +52,7 @@ impl SessionInfo {
 /// 会话管理器
 ///
 /// 管理多个聊天会话的创建、复用和轮转。
-/// 每个会话绑定一个 chat_id（或 thread_id），对应一个 Claude Code 的 session_id。
+/// 每个会话绑定一个 chat_id（或 thread_id），对应一个 Agent 的 session_id。
 #[derive(Debug)]
 pub struct SessionManager {
     /// chat_id → SessionInfo
@@ -102,7 +105,7 @@ impl SessionManager {
                 );
                 (true, None)
             } else {
-                (false, Some(session.claude_session_id.clone()))
+                (false, Some(session.agent_session_id.clone()))
             }
         } else {
             (true, None)
@@ -113,22 +116,23 @@ impl SessionManager {
     pub fn create_session(
         &mut self,
         key: &SessionKey,
-        claude_session_id: &str,
+        agent_session_id: &str,
         cwd: &str,
         agent_gen: u64,
     ) {
         let session = SessionInfo {
-            claude_session_id: claude_session_id.to_string(),
+            agent_session_id: agent_session_id.to_string(),
             cwd: cwd.to_string(),
             created_at: Utc::now(),
             last_active: Utc::now(),
             turn_count: 0,
             max_turns: self.default_max_turns,
             agent_gen,
+            last_images: Vec::new(),
         };
         tracing::info!(
             session_key = %key,
-            claude_session_id = %claude_session_id,
+            agent_session_id = %agent_session_id,
             "创建新会话"
         );
         self.sessions.insert(key.clone(), session);
@@ -138,6 +142,32 @@ impl SessionManager {
     pub fn record_turn(&mut self, key: &SessionKey) {
         if let Some(session) = self.sessions.get_mut(key) {
             session.record_turn();
+        }
+    }
+
+    /// 当前轮次要发送的图片；纯文本追问沿用同一会话最近的图片。
+    pub fn images_for_turn(
+        &self,
+        key: &SessionKey,
+        incoming: &[ImageData],
+        need_new_session: bool,
+    ) -> Vec<ImageData> {
+        if !incoming.is_empty() {
+            incoming.to_vec()
+        } else if need_new_session {
+            Vec::new()
+        } else {
+            self.sessions
+                .get(key)
+                .map(|session| session.last_images.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    /// 仅在 Agent 成功处理后记住最后一张图片，限制每个会话的缓存大小。
+    pub fn remember_images(&mut self, key: &SessionKey, incoming: &[ImageData]) {
+        if let (Some(image), Some(session)) = (incoming.last(), self.sessions.get_mut(key)) {
+            session.last_images = vec![image.clone()];
         }
     }
 
@@ -181,13 +211,14 @@ mod tests {
     #[test]
     fn test_session_info_not_expired() {
         let info = SessionInfo {
-            claude_session_id: "s1".to_string(),
+            agent_session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
             last_active: Utc::now(),
             turn_count: 0,
             max_turns: 20,
             agent_gen: 0,
+            last_images: Vec::new(),
         };
         assert!(!info.is_expired(Duration::from_secs(60)));
         assert!(!info.is_max_turns_reached());
@@ -196,13 +227,14 @@ mod tests {
     #[test]
     fn test_session_info_expired() {
         let mut info = SessionInfo {
-            claude_session_id: "s1".to_string(),
+            agent_session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
             last_active: Utc::now(),
             turn_count: 0,
             max_turns: 20,
             agent_gen: 0,
+            last_images: Vec::new(),
         };
         // 模拟时间流逝
         info.last_active = Utc::now() - chrono::Duration::minutes(5);
@@ -215,13 +247,14 @@ mod tests {
     #[test]
     fn test_session_info_max_turns() {
         let mut info = SessionInfo {
-            claude_session_id: "s1".to_string(),
+            agent_session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
             last_active: Utc::now(),
             turn_count: 0,
             max_turns: 3,
             agent_gen: 0,
+            last_images: Vec::new(),
         };
         assert!(!info.is_max_turns_reached());
         info.record_turn();
@@ -234,13 +267,14 @@ mod tests {
     #[test]
     fn test_session_record_turn_updates_last_active() {
         let mut info = SessionInfo {
-            claude_session_id: "s1".to_string(),
+            agent_session_id: "s1".to_string(),
             cwd: "/tmp".to_string(),
             created_at: Utc::now(),
             last_active: Utc::now(),
             turn_count: 0,
             max_turns: 20,
             agent_gen: 0,
+            last_images: Vec::new(),
         };
         let before = info.last_active;
         thread::sleep(StdDuration::from_millis(10));
@@ -376,7 +410,35 @@ mod tests {
         let mut mgr = SessionManager::new(30, 20);
         mgr.create_session(&"chat_1".to_string(), "s1", "/tmp", 0);
         let info = mgr.get_session(&"chat_1".to_string()).unwrap();
-        assert_eq!(info.claude_session_id, "s1");
+        assert_eq!(info.agent_session_id, "s1");
         assert_eq!(info.turn_count, 0);
+    }
+
+    #[test]
+    fn test_image_followup_keeps_latest_image_only_within_session() {
+        let mut mgr = SessionManager::new(30, 20);
+        let chat = "chat_1".to_string();
+        let first = ImageData {
+            mime_type: "image/png".to_string(),
+            data_base64: "Zmlyc3Q=".to_string(),
+        };
+        let second = ImageData {
+            mime_type: "image/jpeg".to_string(),
+            data_base64: "c2Vjb25k".to_string(),
+        };
+
+        mgr.create_session(&chat, "s1", "/tmp", 0);
+        mgr.remember_images(&chat, std::slice::from_ref(&first));
+        assert_eq!(mgr.images_for_turn(&chat, &[], false), vec![first.clone()]);
+        assert_eq!(
+            mgr.images_for_turn(&chat, std::slice::from_ref(&second), false),
+            vec![second.clone()]
+        );
+        mgr.remember_images(&chat, std::slice::from_ref(&second));
+        assert_eq!(mgr.images_for_turn(&chat, &[], false), vec![second]);
+
+        assert!(mgr.images_for_turn(&chat, &[], true).is_empty());
+        mgr.create_session(&chat, "s2", "/tmp", 1);
+        assert!(mgr.images_for_turn(&chat, &[], false).is_empty());
     }
 }

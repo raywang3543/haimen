@@ -9,7 +9,7 @@
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-brightgreen.svg" alt="License: MIT"></a>
 </p>
 
-**haimen** 是一个 AI 网关基建 CLI 工具，支持多种消息渠道（飞书/Lark、钉钉、GitHub Webhook）和多种 AI 后端（Claude Code、MCP 等）。
+**haimen** 是一个 AI 网关基建 CLI 工具，支持多种消息渠道（飞书/Lark、钉钉、GitHub Webhook）和多种 AI 后端（Ollama、Custom、Codex CLI、OpenClaw）。
 
 ## 安装
 
@@ -96,7 +96,7 @@ haimen uninstall
 ## 特性
 
 - **多消息渠道** — 集成飞书/Lark、钉钉、Relay 中转、GitHub Webhook，统一消息模型
-- **多 AI 后端** — 支持 Claude Code、MCP 协议、OpenAI-compatible API
+- **多 AI 后端** — 支持 Ollama、Custom、Codex CLI、OpenClaw
 - **小智 AI 硬件** — 原生支持 小智 AI 聊天硬件（WebSocket 音频流协议）
 - **Web 管理控制台** — 内置 HTTP 服务器 + React SPA，管理配置、Agent 和语音
 - **TOML 配置管理** — 支持多服务商配置和环境变量引用 `${env.VAR}`
@@ -107,10 +107,12 @@ haimen uninstall
 
 ### AI Agent
 
-| 名称        | 类型          | 说明                 |
-| ----------- | ------------- | -------------------- |
-| Claude Code | AgentProvider | 通过 Claude CLI 交互 |
-| Codex       | AgentProvider | Codex CLI 集成        |
+| 名称       | 类型          | 说明                       |
+| ---------- | ------------- | -------------------------- |
+| Ollama     | AgentProvider | 本地模型 API               |
+| Custom     | AgentProvider | OpenAI 兼容 API            |
+| Codex CLI  | AgentProvider | Codex CLI 集成             |
+| OpenClaw   | AgentProvider | OpenClaw CLI 集成          |
 
 ### 消息渠道
 
@@ -121,6 +123,25 @@ haimen uninstall
 | Relay 中转   | MessageChannel | 主动连接公网 WebSocket  |
 | GitHub       | WebhookHandler | Webhook + @mention 触发 |
 | 小智 AI 硬件 | WebSocket      | 音频流协议直连          |
+
+### 图片消息
+
+飞书/Lark 通道会根据飞书消息中的图片资源 ID 下载图片，并将图片转换为网关内部的统一附件格式。自定义消息通道接入图片时，也应将图片填入统一消息的 `images` 字段：
+
+```json
+{
+  "mime_type": "image/png",
+  "data_base64": "iVBORw0KGgo..."
+}
+```
+
+- `mime_type` 支持 `image/png`、`image/jpeg`、`image/gif`、`image/webp`。
+- `data_base64` 是图片原始字节的标准 Base64 编码，不带 `data:image/...;base64,` 前缀。
+- 单张图片解码后最大为 10 MiB。
+
+以上是网关内部 `ImageData` 结构，**不是当前 Relay 客户端协议**。Relay 目前只接收 `payload.text`，并将图片列表设为空；Relay 客户端暂时不能通过现有协议发送图片。飞书图片由网关自动下载，不需要客户端自行编码成 Base64。
+
+图片能否交给 AI 处理还取决于 Agent：当前 Codex、Ollama 和 Custom 支持图片输入；OpenClaw 暂不支持 haimen 的带图调用。Ollama 和 Custom 所配置的模型/服务也必须支持视觉输入。
 
 ## 快速开始
 
@@ -146,9 +167,9 @@ COMMANDS:
   agent               AI Agent 调试
     run               单次运行 Agent
       <PROMPT>        发送给 Agent 的消息（位置参数）
-      --provider      Agent 提供者（claude-code / codex / openclaw / hermes）
+      --provider      Agent 提供者（ollama / custom / codex / openclaw）
     chat              交互式 Agent 会话（支持 resume）
-      --provider      Agent 提供者（claude-code / codex / openclaw / hermes）
+      --provider      Agent 提供者（ollama / custom / codex / openclaw）
     log               查看 Agent 调用日志
       --limit         显示条数（默认 20）
       --day           只显示指定日期 (YYYY-MM-DD)
@@ -207,12 +228,7 @@ token = "${file:./.env#token}"
 
 # AI 网关配置（支持多服务商）
 [gateway]
-active_provider = "claude-code"
-
-[gateway.providers.claude-code]
-# CLI 工具无需额外凭证
-# 可选：claude CLI 可执行文件路径（留空按 PATH 查找 "claude"）
-# cli_path = "/opt/claude/bin/claude"
+active_provider = "codex"
 
 [gateway.providers.codex]
 # CLI 工具无需额外凭证
@@ -226,11 +242,6 @@ active_provider = "claude-code"
 # 可选：openclaw CLI 可执行文件路径（留空按 PATH 查找 "openclaw"）
 # cli_path = "/opt/openclaw/bin/openclaw"
 
-[gateway.providers.hermes]
-# CLI 工具无需额外凭证；Hermes Agent 经 `hermes chat -q -Q` 子进程调用
-# 可选：hermes CLI 可执行文件路径（留空按 PATH 查找 "hermes"）
-# cli_path = "/opt/hermes/bin/hermes"
-
 [gateway.providers.ollama]
 # 先运行 ollama pull qwen3:8b；模型 ID 必填
 model_id = "qwen3:8b"
@@ -242,15 +253,6 @@ model_id = "qwen3:8b"
 base_url = "https://api.example.com/v1"
 model_id = "my-model"
 api_key = "${env.CUSTOM_AI_API_KEY}"
-
-[gateway.providers.openai]
-api_key = "${env.OPENAI_API_KEY}"
-model = "gpt-4o"
-
-# MCP 服务器（haimen 作为 MCP 客户端）
-[gateway.mcp_servers.filesystem]
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 
 # ASR 配置（小智硬件，支持多服务商）
 [asr]

@@ -5,9 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use haimen_core::ImageData;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
+use super::image::{ImageUrlShape, user_content};
 use crate::gateway::provider::{AgentOutput, AgentProvider};
 
 const MAX_MESSAGES: usize = 40;
@@ -16,7 +18,7 @@ const SESSION_TTL: Duration = Duration::from_secs(60 * 60);
 #[derive(Clone, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
-    content: String,
+    content: serde_json::Value,
 }
 
 struct Session {
@@ -77,6 +79,67 @@ impl OllamaAgent {
         sessions.insert(id.clone(), session.clone());
         (id, session)
     }
+
+    async fn process_content(
+        &self,
+        text: &str,
+        content: serde_json::Value,
+        session_id: Option<&str>,
+        use_openai_endpoint: bool,
+    ) -> Result<(AgentOutput, String), String> {
+        let (id, session) = self.session(session_id);
+        let mut session = session.lock().await;
+        let mut messages = session.messages.clone();
+        messages.push(ChatMessage {
+            role: "user".to_string(),
+            content,
+        });
+        let endpoint = if use_openai_endpoint {
+            format!("{}/v1/chat/completions", self.base_url)
+        } else {
+            format!("{}/api/chat", self.base_url)
+        };
+        let response = self.client.post(endpoint)
+            .json(&serde_json::json!({ "model": self.model_id, "messages": messages, "stream": false }))
+            .send().await.map_err(|e| format!("Ollama 请求失败: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(format!("Ollama 返回 {}: {}", status, detail));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Ollama 响应解析失败: {e}"))?;
+        let pointer = if use_openai_endpoint {
+            "/choices/0/message/content"
+        } else {
+            "/message/content"
+        };
+        let answer = body
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .ok_or("Ollama 响应缺少消息文本")?
+            .to_string();
+        // 历史只保留文字，避免后续请求反复上传图片。
+        messages.last_mut().unwrap().content = serde_json::Value::String(text.to_string());
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: serde_json::Value::String(answer.clone()),
+        });
+        if messages.len() > MAX_MESSAGES {
+            messages.drain(..messages.len() - MAX_MESSAGES);
+        }
+        session.messages = messages;
+        session.touched = Instant::now();
+        Ok((
+            AgentOutput {
+                text: answer,
+                events: Vec::new(),
+            },
+            id,
+        ))
+    }
 }
 
 #[async_trait]
@@ -133,46 +196,25 @@ impl AgentProvider for OllamaAgent {
         session_id: Option<&str>,
         _work_dir: &str,
     ) -> Result<(AgentOutput, String), String> {
-        let (id, session) = self.session(session_id);
-        let mut session = session.lock().await;
-        let mut messages = session.messages.clone();
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: message.to_string(),
-        });
-        let response = self.client.post(format!("{}/api/chat", self.base_url))
-            .json(&serde_json::json!({ "model": self.model_id, "messages": messages, "stream": false }))
-            .send().await.map_err(|e| format!("Ollama 请求失败: {e}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(format!("Ollama 返回 {}: {}", status, detail));
-        }
-        let body: serde_json::Value = response
-            .json()
+        self.process_content(
+            message,
+            user_content(message, &[], ImageUrlShape::String)?,
+            session_id,
+            false,
+        )
+        .await
+    }
+
+    async fn process_with_images(
+        &self,
+        message: &str,
+        images: &[ImageData],
+        session_id: Option<&str>,
+        _work_dir: &str,
+    ) -> Result<(AgentOutput, String), String> {
+        let content = user_content(message, images, ImageUrlShape::String)?;
+        self.process_content(message, content, session_id, !images.is_empty())
             .await
-            .map_err(|e| format!("Ollama 响应解析失败: {e}"))?;
-        let text = body
-            .pointer("/message/content")
-            .and_then(|v| v.as_str())
-            .ok_or("Ollama 响应缺少 message.content")?
-            .to_string();
-        messages.push(ChatMessage {
-            role: "assistant".to_string(),
-            content: text.clone(),
-        });
-        if messages.len() > MAX_MESSAGES {
-            messages.drain(..messages.len() - MAX_MESSAGES);
-        }
-        session.messages = messages;
-        session.touched = Instant::now();
-        Ok((
-            AgentOutput {
-                text,
-                events: Vec::new(),
-            },
-            id,
-        ))
     }
 }
 
@@ -188,6 +230,7 @@ mod tests {
     async fn ollama_checks_model_and_preserves_conversation() {
         let requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
         let captured = requests.clone();
+        let captured_vision = requests.clone();
         let app = Router::new()
             .route("/api/tags", get(|| async {
                 Json(serde_json::json!({"models": [{"name": "qwen3:8b"}]}))
@@ -197,6 +240,13 @@ mod tests {
                 async move {
                     captured.lock().unwrap().push(body);
                     Json(serde_json::json!({"message": {"role": "assistant", "content": "你好"}}))
+                }
+            }))
+            .route("/v1/chat/completions", post(move |Json(body): Json<serde_json::Value>| {
+                let captured = captured_vision.clone();
+                async move {
+                    captured.lock().unwrap().push(body);
+                    Json(serde_json::json!({"choices": [{"message": {"content": "看到图片"}}]}))
                 }
             }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -209,12 +259,28 @@ mod tests {
         assert_eq!(first.text, "你好");
         let (_, resumed_sid) = agent.process("第二句", Some(&sid), ".").await.unwrap();
         assert_eq!(sid, resumed_sid);
+        let image = ImageData {
+            mime_type: "image/png".to_string(),
+            data_base64: "aW1hZ2U=".to_string(),
+        };
+        let (image_output, _) = agent
+            .process_with_images("看图", &[image], Some(&sid), ".")
+            .await
+            .unwrap();
+        assert_eq!(image_output.text, "看到图片");
+        agent.process("继续", Some(&sid), ".").await.unwrap();
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         assert_eq!(requests[0]["model"], "qwen3:8b");
         assert_eq!(requests[0]["stream"], false);
         assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 3);
         assert_eq!(requests[1]["messages"][1]["content"], "你好");
+        assert_eq!(requests[2]["messages"][4]["content"][0]["text"], "看图");
+        assert_eq!(
+            requests[2]["messages"][4]["content"][1]["image_url"],
+            "data:image/png;base64,aW1hZ2U="
+        );
+        assert_eq!(requests[3]["messages"][4]["content"], "看图");
         server.abort();
     }
 

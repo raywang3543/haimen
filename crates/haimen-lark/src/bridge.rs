@@ -1,7 +1,9 @@
 use std::pin::Pin;
 use std::process::Stdio;
 
+use base64::Engine;
 use futures_util::Stream;
+use haimen_core::ImageData;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -63,6 +65,62 @@ impl LarkCliBridge {
         }
 
         Ok(value)
+    }
+
+    /// 获取飞书图片并转成统一消息模型中的 base64 附件。
+    pub async fn download_image(
+        &self,
+        message_id: &str,
+        image_key: &str,
+    ) -> Result<ImageData, String> {
+        if !valid_resource_id(message_id) || !valid_resource_id(image_key) {
+            return Err("飞书图片资源 ID 无效".to_string());
+        }
+        let dir = tempfile::tempdir().map_err(|e| format!("创建图片临时目录失败: {e}"))?;
+        let output = Command::from(haimen_core::process::build_command(
+            &self.lark_cli_path,
+            &[
+                "im",
+                "+messages-resources-download",
+                "--as",
+                "bot",
+                "--message-id",
+                message_id,
+                "--file-key",
+                image_key,
+                "--type",
+                "image",
+                "--output",
+                "image",
+            ],
+        ))
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("下载飞书图片失败: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "下载飞书图片失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let file = std::fs::read_dir(dir.path())
+            .map_err(|e| format!("读取图片临时目录失败: {e}"))?
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .ok_or("lark-cli 未保存图片文件")?;
+        const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+        if file.metadata().map_err(|e| e.to_string())?.len() > MAX_IMAGE_BYTES {
+            return Err("飞书图片超过 10 MiB 限制".to_string());
+        }
+        let bytes = std::fs::read(file.path()).map_err(|e| format!("读取飞书图片失败: {e}"))?;
+        let mime_type = detect_image_mime(&bytes).ok_or("不支持的飞书图片格式")?;
+        Ok(ImageData {
+            mime_type: mime_type.to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
     }
 
     pub async fn stream(
@@ -135,7 +193,7 @@ impl LarkCliBridge {
 
         let authenticated = Command::from(haimen_core::process::build_command(
             &self.lark_cli_path,
-            &["auth", "status", "--json"],
+            &["auth", "status"],
         ))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -154,6 +212,27 @@ impl LarkCliBridge {
     #[allow(dead_code)]
     pub fn path(&self) -> &str {
         &self.lark_cli_path
+    }
+}
+
+fn valid_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 

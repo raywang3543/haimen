@@ -182,10 +182,10 @@ mod tests {
 
     #[test]
     fn test_handle_new_starts_at_generation_zero() {
-        let handle = AgentHandle::new(mock("claude-code"));
+        let handle = AgentHandle::new(mock("codex"));
         assert_eq!(handle.generation, 0);
-        assert_eq!(handle.name, "claude-code");
-        assert_eq!(handle.agent.name(), "claude-code");
+        assert_eq!(handle.name, "codex");
+        assert_eq!(handle.agent.name(), "codex");
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_switch_unknown_provider_rolls_back() {
-        let shared = shared_with("claude-code");
+        let shared = shared_with("openclaw");
         let gateway = GatewayConfig {
             active_provider: "does-not-exist".to_string(),
             ..Default::default()
@@ -243,15 +243,15 @@ mod tests {
 
         // 回滚：共享状态保持原样
         let snap = snapshot(&shared);
-        assert_eq!(snap.name, "claude-code");
+        assert_eq!(snap.name, "openclaw");
         assert_eq!(snap.generation, 0);
     }
 
     #[tokio::test]
     async fn test_try_switch_known_provider_swaps() {
-        let shared = shared_with("claude-code");
+        let shared = shared_with("openclaw");
         let gateway = GatewayConfig {
-            active_provider: "claude-code".to_string(),
+            active_provider: "codex".to_string(),
             ..Default::default()
         };
 
@@ -259,9 +259,9 @@ mod tests {
         // 若 CLI 不可用则保持原样 —— 两种结果都不破坏状态一致性。
         match try_switch_agent(&shared, &gateway).await {
             Ok(name) => {
-                assert_eq!(name, "claude-code");
+                assert_eq!(name, "codex");
                 let snap = snapshot(&shared);
-                assert_eq!(snap.name, "claude-code");
+                assert_eq!(snap.name, "codex");
                 assert_eq!(snap.generation, 1);
             }
             Err(_) => {

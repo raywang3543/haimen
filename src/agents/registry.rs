@@ -11,9 +11,7 @@ use super::custom::CustomAgent;
 use super::ollama::OllamaAgent;
 use crate::config::settings::GatewayConfig;
 use crate::gateway::provider::AgentProvider;
-use haimen_claude_code::ClaudeAgent;
 use haimen_codex::{CodexAgent, CodexModelConfig, DEFAULT_SANDBOX};
-use haimen_hermes::HermesAgent;
 use haimen_openclaw::{DEFAULT_AGENT_ID, OpenClawAgent};
 
 /// Agent 提供商的展示信息（供 Web API / 前端渲染）
@@ -122,7 +120,7 @@ fn resolve_openclaw_agent(config: &GatewayConfig) -> String {
 /// 从网关配置解析某 Agent 的 CLI 可执行文件路径
 ///
 /// 优先读取 `[gateway.providers.<name>] cli_path`；空值 / 纯空白 / 未配置时
-/// 回退到默认裸命令名（如 "claude"），由 `build_command` 按 PATH 查找。
+/// 回退到默认裸命令名（如 "codex"），由 `build_command` 按 PATH 查找。
 /// 支持绝对路径与 Windows `.cmd` shim（`build_command` 内部处理）。
 fn resolve_cli_path(config: &GatewayConfig, provider: &str, default_binary: &str) -> String {
     config
@@ -137,13 +135,6 @@ fn resolve_cli_path(config: &GatewayConfig, provider: &str, default_binary: &str
 /// 内置 Agent 注册（新增 Agent 只需在此加一行）
 fn builtin() -> AgentRegistry {
     let mut registry = AgentRegistry::new();
-    registry
-        .register("claude-code", "Claude Code", |config| {
-            // cli_path 从 providers.claude-code.cli_path 读取，默认 "claude"（PATH 查找）
-            let cli_path = resolve_cli_path(config, "claude-code", "claude");
-            Ok(Box::new(ClaudeAgent::new(cli_path)))
-        })
-        .expect("内置 Agent claude-code 注册失败");
     registry
         .register("codex", "Codex CLI", |config| {
             // 沙箱策略从 providers.codex.sandbox 读取，默认放开沙箱：
@@ -179,17 +170,6 @@ fn builtin() -> AgentRegistry {
             Ok(Box::new(OpenClawAgent::new(cli_path, agent, timeout)))
         })
         .expect("内置 Agent openclaw 注册失败");
-    registry
-        .register("hermes", "Hermes", |config| {
-            // 极简：仅 timeout（haimen 侧等待子进程退出上限，hermes 无 CLI 侧超时）；
-            // model/provider 透传留作后续扩展
-            let cli_path = resolve_cli_path(config, "hermes", "hermes");
-            Ok(Box::new(HermesAgent::new(
-                cli_path,
-                config.agent_timeout_secs,
-            )))
-        })
-        .expect("内置 Agent hermes 注册失败");
     registry
         .register("ollama", "Ollama", |config| {
             let fields = config.providers.get("ollama");
@@ -254,22 +234,17 @@ mod tests {
 
     #[test]
     fn test_builtin_registers_default_provider() {
-        // 默认 active_provider 是 "claude-code"，必须恒注册，否则默认启动即报错
-        assert!(registry().has("claude-code"));
+        // 默认 active_provider 是 "codex"，必须恒注册，否则默认启动即报错
         assert!(registry().has("codex"));
         assert!(registry().has("openclaw"));
-        assert!(registry().has("hermes"));
         assert!(registry().has("ollama"));
         assert!(registry().has("custom"));
+        assert!(!registry().has("claude-code"));
+        assert!(!registry().has("hermes"));
     }
 
     #[test]
     fn test_build_known_agent() {
-        let agent = registry()
-            .build("claude-code", &test_config())
-            .expect("claude-code 应可构造");
-        assert_eq!(agent.name(), "claude-code");
-
         let codex = registry()
             .build("codex", &test_config())
             .expect("codex 应可构造");
@@ -279,11 +254,6 @@ mod tests {
             .build("openclaw", &test_config())
             .expect("openclaw 应可构造");
         assert_eq!(openclaw.name(), "openclaw");
-
-        let hermes = registry()
-            .build("hermes", &test_config())
-            .expect("hermes 应可构造");
-        assert_eq!(hermes.name(), "hermes");
     }
 
     #[test]
@@ -320,22 +290,23 @@ mod tests {
     fn test_list_contains_builtin() {
         let list = registry().list();
         let ids: Vec<&str> = list.iter().map(|info| info.id).collect();
-        assert!(ids.contains(&"claude-code"));
         assert!(ids.contains(&"codex"));
         assert!(ids.contains(&"openclaw"));
-        assert!(ids.contains(&"hermes"));
         assert!(ids.contains(&"ollama"));
         assert!(ids.contains(&"custom"));
+        assert_eq!(ids.len(), 4);
     }
 
     #[test]
     fn test_duplicate_registration_rejected() {
         let mut reg = AgentRegistry::new();
-        reg.register("dup", "Dup", |_c| Ok(Box::new(ClaudeAgent::new("claude"))))
-            .expect("首次注册应成功");
+        reg.register("dup", "Dup", |_c| {
+            Ok(Box::new(CodexAgent::new("codex", DEFAULT_SANDBOX)))
+        })
+        .expect("首次注册应成功");
         let err = reg
             .register("dup", "Dup 2", |_c| {
-                Ok(Box::new(ClaudeAgent::new("claude")))
+                Ok(Box::new(CodexAgent::new("codex", DEFAULT_SANDBOX)))
             })
             .expect_err("重复注册应返回 Err");
         assert_eq!(err, "Agent 重复注册: dup");
@@ -343,19 +314,19 @@ mod tests {
 
     #[test]
     fn test_factory_receives_config() {
-        // 验证工厂能拿到 config（为 MCP 等需要配置的 Agent 铺路）
+        // 验证工厂能拿到 config。
         let mut reg = AgentRegistry::new();
         reg.register("cfg-agent", "Cfg", |config| {
             let wd = config.work_dir.clone().unwrap_or_default();
             if wd.is_empty() {
-                Ok(Box::new(ClaudeAgent::new("claude")))
+                Ok(Box::new(CodexAgent::new("codex", DEFAULT_SANDBOX)))
             } else {
                 Err("不应走到".to_string())
             }
         })
         .expect("注册成功");
         let agent = reg.build("cfg-agent", &test_config()).expect("构造成功");
-        assert_eq!(agent.name(), "claude-code");
+        assert_eq!(agent.name(), "codex");
     }
 
     #[test]
@@ -395,7 +366,7 @@ mod tests {
         let mut providers = HashMap::new();
         let mut params = HashMap::new();
         params.insert("sandbox".to_string(), "read-only".to_string());
-        providers.insert("claude-code".to_string(), params);
+        providers.insert("custom".to_string(), params);
         config.providers = providers;
         assert_eq!(resolve_codex_sandbox(&config), DEFAULT_SANDBOX);
     }
@@ -436,7 +407,6 @@ mod tests {
         // 未配置时回退到默认裸命令名（PATH 查找）
         let config = GatewayConfig::default();
         assert_eq!(resolve_cli_path(&config, "codex", "codex"), "codex");
-        assert_eq!(resolve_cli_path(&config, "claude-code", "claude"), "claude");
     }
 
     #[test]
@@ -475,6 +445,9 @@ mod tests {
         params.insert("cli_path".to_string(), "/weird/path".to_string());
         providers.insert("codex".to_string(), params);
         config.providers = providers;
-        assert_eq!(resolve_cli_path(&config, "hermes", "hermes"), "hermes");
+        assert_eq!(
+            resolve_cli_path(&config, "openclaw", "openclaw"),
+            "openclaw"
+        );
     }
 }

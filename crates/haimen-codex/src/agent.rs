@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use base64::Engine;
 use futures_util::StreamExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -6,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing;
 
+use haimen_core::ImageData;
 use haimen_core::provider::{
     AgentEventStream, AgentLogEvent, AgentOutput, AgentProvider, TextStream,
 };
@@ -140,6 +142,67 @@ impl AgentProvider for CodexAgent {
         ))
     }
 
+    async fn process_with_images(
+        &self,
+        message: &str,
+        images: &[ImageData],
+        session_id: Option<&str>,
+        work_dir: &str,
+    ) -> Result<(AgentOutput, String), String> {
+        if images.is_empty() {
+            return self.process(message, session_id, work_dir).await;
+        }
+        let dir = tempfile::tempdir().map_err(|e| format!("创建图片临时目录失败: {e}"))?;
+        let mut paths = Vec::with_capacity(images.len());
+        for (index, image) in images.iter().enumerate() {
+            let extension = match image.mime_type.as_str() {
+                "image/png" => "png",
+                "image/jpeg" => "jpg",
+                "image/gif" => "gif",
+                "image/webp" => "webp",
+                _ => return Err(format!("Codex 不支持图片格式: {}", image.mime_type)),
+            };
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&image.data_base64)
+                .map_err(|e| format!("图片 base64 解码失败: {e}"))?;
+            if bytes.len() > 10 * 1024 * 1024 {
+                return Err("图片超过 10 MiB 限制".to_string());
+            }
+            let path = dir.path().join(format!("image-{index}.{extension}"));
+            std::fs::write(&path, bytes).map_err(|e| format!("保存临时图片失败: {e}"))?;
+            paths.push(path.to_string_lossy().to_string());
+        }
+
+        let work_dir = self.work_dir.as_deref().unwrap_or(work_dir);
+        std::fs::create_dir_all(work_dir)
+            .map_err(|e| format!("创建 Codex 工作目录失败 ({work_dir}): {e}"))?;
+        let (mut stream, sid) = process_with_codex_stream(
+            message,
+            session_id,
+            work_dir,
+            &self.cli_path,
+            &self.sandbox,
+            &self.model_config,
+            &paths,
+        )
+        .await?;
+        let mut full_text = String::new();
+        while let Some(chunk) = stream.next().await {
+            full_text.push_str(&chunk);
+        }
+        let text = full_text.trim().to_string();
+        if text.is_empty() {
+            return Err("Codex 返回为空".to_string());
+        }
+        Ok((
+            AgentOutput {
+                text,
+                events: Vec::new(),
+            },
+            sid,
+        ))
+    }
+
     /// 流式处理：逐块返回 codex 的文本输出
     async fn process_stream(
         &self,
@@ -157,6 +220,7 @@ impl AgentProvider for CodexAgent {
             &self.cli_path,
             &self.sandbox,
             &self.model_config,
+            &[],
         )
         .await?;
         // codex 的 reasoning/tool 轨迹捕获留作后续，事件流为空（sender 立即 drop）
@@ -184,8 +248,15 @@ async fn process_with_codex_stream(
     cli_path: &str,
     sandbox: &str,
     model_config: &CodexModelConfig,
+    image_paths: &[String],
 ) -> Result<(TextStream, String), String> {
-    let args = build_codex_args(prompt, resume_session_id, sandbox, model_config);
+    let args = build_codex_args_with_images(
+        prompt,
+        resume_session_id,
+        sandbox,
+        model_config,
+        image_paths,
+    );
 
     tracing::debug!(args = ?args, "启动 codex 子进程");
 
@@ -383,11 +454,22 @@ async fn process_with_codex_stream(
 /// （`resume`）之前。**resume 会话同样需要 `--json`**——若缺失，codex 会把
 /// 完整会话转写输出到 stderr、最终答案以纯文本输出到 stdout，而非 JSONL
 /// 事件流，haimen 将无法提取 `thread_id` 与回复文本。
+#[cfg(test)]
 fn build_codex_args(
     prompt: &str,
     resume_session_id: Option<&str>,
     sandbox: &str,
     model_config: &CodexModelConfig,
+) -> Vec<String> {
+    build_codex_args_with_images(prompt, resume_session_id, sandbox, model_config, &[])
+}
+
+fn build_codex_args_with_images(
+    prompt: &str,
+    resume_session_id: Option<&str>,
+    sandbox: &str,
+    model_config: &CodexModelConfig,
+    image_paths: &[String],
 ) -> Vec<String> {
     let mut args = vec![
         "exec".to_string(),
@@ -408,6 +490,15 @@ fn build_codex_args(
     if let Some(sid) = resume_session_id {
         args.push("resume".to_string());
         args.push(sid.to_string());
+    }
+    for path in image_paths {
+        args.push("--image".to_string());
+        args.push(path.clone());
+    }
+    // `--image <FILE>...` 会吞掉后面的所有位置参数；用 `--` 明确结束选项，
+    // 否则 Codex 会认为没有提供 PROMPT 并改从 stdin 读取。
+    if !image_paths.is_empty() {
+        args.push("--".to_string());
     }
     args.push(prompt.to_string());
     args
@@ -662,6 +753,70 @@ mod tests {
         let args = build_codex_args("hi", None, "workspace-write", &CodexModelConfig::default());
         assert!(args.contains(&"workspace-write".to_string()));
         assert!(args.contains(&"--sandbox".to_string()));
+    }
+
+    #[test]
+    fn test_build_codex_args_with_image_for_new_and_resumed_turns() {
+        let paths = vec!["/tmp/received-image.png".to_string()];
+        for session in [None, Some("session-id")] {
+            let args = build_codex_args_with_images(
+                "请描述图片",
+                session,
+                DEFAULT_SANDBOX,
+                &CodexModelConfig::default(),
+                &paths,
+            );
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--image", paths[0].as_str()])
+            );
+            assert_eq!(args.last().map(String::as_str), Some("请描述图片"));
+            assert_eq!(args[args.len() - 2], "--");
+            if session.is_some() {
+                let resume = args.iter().position(|arg| arg == "resume").unwrap();
+                let image = args.iter().position(|arg| arg == "--image").unwrap();
+                assert!(resume < image);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_process_with_images_attaches_decoded_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let expected = dir.path().join("expected.png");
+        let bytes = b"\x89PNG\r\n\x1a\nimage-data";
+        std::fs::write(&expected, bytes).unwrap();
+        let cli = dir.path().join("fake-codex");
+        std::fs::write(
+            &cli,
+            format!(
+                "#!/bin/sh\nimage=\"\"\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --image ]; then image=\"$2\"; shift 2; else shift; fi\ndone\n[ -f \"$image\" ] && cmp -s \"$image\" '{}' || exit 2\necho '{{\"type\":\"thread.started\",\"thread_id\":\"test-session\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"saw image\"}}}}'\n",
+                expected.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let agent = CodexAgent::new(cli.to_string_lossy(), DEFAULT_SANDBOX);
+        let image = ImageData {
+            mime_type: "image/png".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        for session in [None, Some("test-session")] {
+            let (output, sid) = agent
+                .process_with_images(
+                    "describe",
+                    std::slice::from_ref(&image),
+                    session,
+                    dir.path().to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output.text, "saw image");
+            assert_eq!(sid, "test-session");
+        }
     }
 
     #[test]

@@ -288,7 +288,7 @@ pub async fn verify_agent_credentials(
     let provider = body
         .get("provider")
         .and_then(|v| v.as_str())
-        .unwrap_or("claude-code");
+        .unwrap_or("codex");
 
     let mut cfg = load_config();
 
@@ -362,7 +362,7 @@ mod tests {
     fn test_parse_providers_valid() {
         let json = serde_json::json!({
             "providers": {
-                "claude-code": {
+                "openclaw": {
                     "note": "CLI 工具无需额外凭证"
                 },
                 "codex": {
@@ -372,7 +372,7 @@ mod tests {
         });
         let providers = parse_providers(&json).unwrap();
         assert_eq!(providers.len(), 2);
-        assert!(providers.contains_key("claude-code"));
+        assert!(providers.contains_key("openclaw"));
         assert!(providers.contains_key("codex"));
     }
 
@@ -380,14 +380,14 @@ mod tests {
     fn test_parse_providers_skips_empty() {
         let json = serde_json::json!({
             "providers": {
-                "claude-code": {
+                "openclaw": {
                     "note": ""
                 }
             }
         });
         let providers = parse_providers(&json).unwrap();
-        let cc = providers.get("claude-code").unwrap();
-        assert!(cc.get("note").is_none());
+        let provider = providers.get("openclaw").unwrap();
+        assert!(provider.get("note").is_none());
     }
 
     #[test]

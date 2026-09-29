@@ -115,9 +115,9 @@ cargo tarpaulin                     # 生成覆盖率报告
 │   │   └── mod.rs
 │   ├── agents/          # AI Agent 实现
 │   │   ├── registry.rs  # AgentRegistry 注册表（内置 Agent 分发）
-│   │   ├── error.rs     # Agent 错误类型
-│   │   ├── mcp_client.rs# MCP 协议客户端
-│   │   ├── mcp_agent.rs # McpAgent: impl AgentProvider
+│   │   ├── custom.rs    # Custom Agent（OpenAI 兼容接口）
+│   │   ├── ollama.rs    # Ollama Agent
+│   │   ├── image.rs     # 图片内容块构造
 │   │   └── mod.rs
 │   ├── config/
 │   │   ├── mod.rs       # 配置模块入口
@@ -136,8 +136,8 @@ cargo tarpaulin                     # 生成覆盖率报告
 │   ├── haimen-core/     # 共享抽象层（Message / MessageChannel / AgentProvider）
 │   ├── haimen-lark/     # Lark/飞书消息通道连接器
 │   ├── haimen-xiaozhi/  # Xiaozhi 音频/WebSocket 集成
-│   ├── haimen-claude-code/ # Claude Code Agent（claude --print）
-│   └── haimen-codex/    # Codex CLI Agent（codex exec --json）
+│   ├── haimen-codex/    # Codex CLI Agent（codex exec --json）
+│   └── haimen-openclaw/ # OpenClaw Agent
 ├── tests/               # 集成测试
 ├── .agents/             # 架构方案/计划
 ├── .github/             # CI/CD 配置

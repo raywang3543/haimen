@@ -81,6 +81,7 @@ where
             sender = %message.sender_id,
             chat_id = %chat_id,
             message = %message.content,
+            image_count = message.images.len(),
             "收到消息"
         );
 
@@ -94,14 +95,22 @@ where
         let snap = snapshot(agent);
         let (need_new_session, existing_session_id) =
             session_mgr.get_or_create(&chat_id, snap.generation);
+        let images = session_mgr.images_for_turn(&chat_id, &message.images, need_new_session);
 
         // 调用 Agent 处理
         let start = std::time::Instant::now();
         let result = if need_new_session {
-            snap.agent.process(&message.content, None, &work_dir).await
+            snap.agent
+                .process_with_images(&message.content, &images, None, &work_dir)
+                .await
         } else {
             snap.agent
-                .process(&message.content, existing_session_id.as_deref(), &work_dir)
+                .process_with_images(
+                    &message.content,
+                    &images,
+                    existing_session_id.as_deref(),
+                    &work_dir,
+                )
                 .await
         };
 
@@ -148,6 +157,7 @@ where
                         snap.generation,
                     );
                 }
+                session_mgr.remember_images(&chat_id, &images);
                 session_mgr.record_turn(&chat_id);
 
                 tracing::info!(
@@ -170,7 +180,11 @@ where
                     session_mgr.remove_session(&chat_id);
 
                     let retry_start = std::time::Instant::now();
-                    match snap.agent.process(&message.content, None, &work_dir).await {
+                    match snap
+                        .agent
+                        .process_with_images(&message.content, &images, None, &work_dir)
+                        .await
+                    {
                         Ok((agent_output, new_session_id)) => {
                             record_call(
                                 "success",
@@ -186,6 +200,7 @@ where
                                 &work_dir,
                                 snap.generation,
                             );
+                            session_mgr.remember_images(&chat_id, &images);
                             tracing::info!(
                                 chat_id = %chat_id,
                                 response = %agent_output.text,
@@ -361,6 +376,7 @@ pub async fn run_unified_gateway(
             sender = %message.sender_id,
             chat_id = %chat_id,
             message = %message.content,
+            image_count = message.images.len(),
             "收到消息"
         );
 
@@ -374,14 +390,20 @@ pub async fn run_unified_gateway(
         let snap = snapshot(agent);
         let (need_new_session, existing_session_id) =
             session_mgr.get_or_create(&chat_id, snap.generation);
+        let images = session_mgr.images_for_turn(&chat_id, &message.images, need_new_session);
 
         // 调用 Agent 处理（带超时）
         let start = std::time::Instant::now();
         let process_fut = if need_new_session {
-            snap.agent.process(&message.content, None, &work_dir)
-        } else {
             snap.agent
-                .process(&message.content, existing_session_id.as_deref(), &work_dir)
+                .process_with_images(&message.content, &images, None, &work_dir)
+        } else {
+            snap.agent.process_with_images(
+                &message.content,
+                &images,
+                existing_session_id.as_deref(),
+                &work_dir,
+            )
         };
 
         // 记录一次 Agent 调用（每次 process 尝试都记一条）
@@ -429,6 +451,7 @@ pub async fn run_unified_gateway(
                         snap.generation,
                     );
                 }
+                session_mgr.remember_images(&chat_id, &images);
                 session_mgr.record_turn(&chat_id);
 
                 tracing::info!(
@@ -455,7 +478,9 @@ pub async fn run_unified_gateway(
                     session_mgr.remove_session(&chat_id);
 
                     let retry_start = std::time::Instant::now();
-                    let retry_fut = snap.agent.process(&message.content, None, &work_dir);
+                    let retry_fut =
+                        snap.agent
+                            .process_with_images(&message.content, &images, None, &work_dir);
                     let retry_result = tokio::time::timeout(timeout_duration, retry_fut).await;
 
                     match retry_result {
@@ -474,6 +499,7 @@ pub async fn run_unified_gateway(
                                 &work_dir,
                                 snap.generation,
                             );
+                            session_mgr.remember_images(&chat_id, &images);
                             tracing::info!(
                                 chat_id = %chat_id,
                                 response = %agent_output.text,
@@ -1003,14 +1029,15 @@ mod tests {
             conversation_id: conversation_id.to_string(),
             sender_id: "test-sender".to_string(),
             content: content.to_string(),
+            images: Vec::new(),
             timestamp: Utc::now(),
             channel: "test".to_string(),
         }
     }
 
-    async fn run_gateway_test(
+    async fn run_gateway_test<A: AgentProvider + 'static>(
         channels: Vec<(&'static str, MockChannel)>,
-        agent: MockAgent,
+        agent: A,
         config: GatewayConfig,
         cancel: CancellationToken,
     ) -> Result<(), String> {
@@ -1543,6 +1570,93 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "stream ends → Err");
+    }
+
+    #[tokio::test]
+    async fn test_image_is_not_sent_to_text_only_agent() {
+        let mut message = test_msg("c1", "请描述图片");
+        message.images.push(haimen_core::ImageData {
+            mime_type: "image/png".to_string(),
+            data_base64: "aW1hZ2U=".to_string(),
+        });
+        let channel = MockChannel::new("ch", vec![message]);
+        let agent = MockAgent::new(vec!["should not be called"]);
+        let process_count = agent.process_count.clone();
+        let _ = run_gateway_test(
+            vec![("ch", channel)],
+            agent,
+            default_config(),
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(process_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_image_is_reattached_on_text_followup() {
+        struct ImageAgent {
+            seen: Arc<Mutex<Vec<(usize, Option<String>)>>>,
+        }
+
+        #[async_trait]
+        impl AgentProvider for ImageAgent {
+            fn name(&self) -> &str {
+                "image-agent"
+            }
+
+            async fn process(
+                &self,
+                _message: &str,
+                _session_id: Option<&str>,
+                _work_dir: &str,
+            ) -> Result<(AgentOutput, String), String> {
+                Err("图片未传入".to_string())
+            }
+
+            async fn process_with_images(
+                &self,
+                _message: &str,
+                images: &[haimen_core::ImageData],
+                session_id: Option<&str>,
+                _work_dir: &str,
+            ) -> Result<(AgentOutput, String), String> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((images.len(), session_id.map(str::to_string)));
+                Ok((
+                    AgentOutput {
+                        text: "看到了".to_string(),
+                        events: Vec::new(),
+                    },
+                    "image-session".to_string(),
+                ))
+            }
+
+            async fn check_available(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let mut first = test_msg("chat", "请描述图片");
+        first.images.push(haimen_core::ImageData {
+            mime_type: "image/png".to_string(),
+            data_base64: "aW1hZ2U=".to_string(),
+        });
+        let followup = test_msg("chat", "你能看到刚才的图片吗？");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let _ = run_gateway_test(
+            vec![("lark", MockChannel::new("lark", vec![first, followup]))],
+            ImageAgent { seen: seen.clone() },
+            default_config(),
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(1, None), (1, Some("image-session".to_string()))]
+        );
     }
 
     // ---------------------------------------------------------------------------

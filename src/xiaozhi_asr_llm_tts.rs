@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
+use haimen_core::ImageData;
 use haimen_xiaozhi::{AudioFrame, AudioParams, PlaybackEvent, ResponseStrategy};
 use opus2::{Application, Channels, Decoder};
 use tokio::sync::{Notify, mpsc};
@@ -52,7 +53,7 @@ use univoice::asr::{
 use univoice::tts::TtsRequest;
 
 use crate::config::settings::{AsrConfig, TtsConfig};
-use crate::gateway::provider::{AgentEventStream, AgentLogEvent};
+use crate::gateway::provider::{AgentEventStream, AgentLogEvent, TextStream};
 use crate::sensevoice_asr::SenseVoiceAsr;
 use crate::xiaozhi_tts::pcm_to_opus_frames;
 
@@ -1458,6 +1459,7 @@ impl AsrLlmTtsStrategy {
     async fn respond_without_audio(
         &self,
         user_text: String,
+        images: &[ImageData],
         session_id: &str,
         frame_tx: mpsc::Sender<PlaybackEvent>,
     ) -> Result<(), String> {
@@ -1480,6 +1482,59 @@ impl AsrLlmTtsStrategy {
         if let Some(text) = fixed_text {
             let _ = frame_tx.send(PlaybackEvent::LlmSentence(text)).await;
             return Ok(());
+        }
+
+        if !images.is_empty() {
+            let start = std::time::Instant::now();
+            let agent = crate::gateway::agent_handle::snapshot(&self.agent);
+            let current_session = self.llm_session_at(agent.generation)?;
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                agent.agent.process_with_images(
+                    &user_text,
+                    images,
+                    current_session.as_deref(),
+                    &self.work_dir,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| Err("等待图片回复超时 (300s)".to_string()));
+            let result = match response {
+                Ok((output, new_session)) => {
+                    self.store_llm_session_at(new_session, agent.generation);
+                    let send_result = frame_tx
+                        .send(PlaybackEvent::LlmSentence(output.text.clone()))
+                        .await
+                        .map_err(|_| "文字回复连接已关闭".to_string());
+                    self.record_agent_log(
+                        &user_text,
+                        session_id,
+                        Some(&output.text),
+                        if send_result.is_ok() {
+                            "success"
+                        } else {
+                            "error"
+                        },
+                        send_result.as_ref().err().map(String::as_str),
+                        start.elapsed(),
+                        output.events,
+                    );
+                    send_result
+                }
+                Err(error) => {
+                    self.record_agent_log(
+                        &user_text,
+                        session_id,
+                        None,
+                        "error",
+                        Some(&error),
+                        start.elapsed(),
+                        Vec::new(),
+                    );
+                    Err(error)
+                }
+            };
+            return result;
         }
 
         let start = std::time::Instant::now();
@@ -1553,6 +1608,7 @@ impl AsrLlmTtsStrategy {
     async fn respond_to_text_stream(
         &self,
         user_text: String,
+        images: &[ImageData],
         session_id: &str,
         frame_tx: tokio::sync::mpsc::Sender<PlaybackEvent>,
     ) -> Result<(), String> {
@@ -1636,11 +1692,38 @@ impl AsrLlmTtsStrategy {
 
                 agent_mode = true;
                 agent_start = std::time::Instant::now();
-                let (text_stream_inner, new_llm_session_id, events_rx) = match agent_snap
-                    .agent
-                    .process_stream(&user_text, current_llm_session.as_deref(), &self.work_dir)
-                    .await
-                {
+                let agent_result = if images.is_empty() {
+                    agent_snap
+                        .agent
+                        .process_stream(&user_text, current_llm_session.as_deref(), &self.work_dir)
+                        .await
+                } else {
+                    match agent_snap
+                        .agent
+                        .process_with_images(
+                            &user_text,
+                            images,
+                            current_llm_session.as_deref(),
+                            &self.work_dir,
+                        )
+                        .await
+                    {
+                        Ok((output, sid)) => {
+                            let haimen_core::AgentOutput { text, events } = output;
+                            let (tx, rx) = mpsc::channel(events.len().max(1));
+                            for event in events {
+                                if tx.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                            let text_stream: TextStream =
+                                Box::pin(stream::once(async move { text }));
+                            Ok((text_stream, sid, rx))
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+                let (text_stream_inner, new_llm_session_id, events_rx) = match agent_result {
                     Ok(ok) => ok,
                     Err(e) => {
                         let msg = format!("AI Agent 流式处理失败: {}", e);
@@ -2380,7 +2463,7 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
             }
         };
 
-        self.respond_to_text_stream(user_text, session_id, frame_tx)
+        self.respond_to_text_stream(user_text, &[], session_id, frame_tx)
             .await
     }
 
@@ -2390,7 +2473,7 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
         session_id: &str,
         frame_tx: tokio::sync::mpsc::Sender<PlaybackEvent>,
     ) -> Result<(), String> {
-        self.respond_to_text_stream(text, session_id, frame_tx)
+        self.respond_to_text_stream(text, &[], session_id, frame_tx)
             .await
     }
 
@@ -2407,7 +2490,7 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
                 .await;
         }
         if let Some(text) = self.resolve_user_text(&audio_buffer, session_id).await? {
-            self.respond_without_audio(text, session_id, frame_tx)
+            self.respond_without_audio(text, &[], session_id, frame_tx)
                 .await?;
         }
         Ok(())
@@ -2421,10 +2504,28 @@ impl ResponseStrategy for AsrLlmTtsStrategy {
         tts_enabled: bool,
     ) -> Result<(), String> {
         if tts_enabled {
-            self.respond_to_text_stream(text, session_id, frame_tx)
+            self.respond_to_text_stream(text, &[], session_id, frame_tx)
                 .await
         } else {
-            self.respond_without_audio(text, session_id, frame_tx).await
+            self.respond_without_audio(text, &[], session_id, frame_tx)
+                .await
+        }
+    }
+
+    async fn generate_text_response_stream_with_images(
+        &self,
+        text: String,
+        images: Vec<ImageData>,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if tts_enabled {
+            self.respond_to_text_stream(text, &images, session_id, frame_tx)
+                .await
+        } else {
+            self.respond_without_audio(text, &images, session_id, frame_tx)
+                .await
         }
     }
 
@@ -3462,6 +3563,32 @@ mod tests {
             ))
         }
 
+        async fn process_with_images(
+            &self,
+            message: &str,
+            images: &[ImageData],
+            session_id: Option<&str>,
+            _work_dir: &str,
+        ) -> Result<(AgentOutput, String), String> {
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].mime_type, "image/png");
+            Ok((
+                AgentOutput {
+                    text: format!(
+                        "{message} image {}{}",
+                        images.len(),
+                        if session_id.is_some() {
+                            " continued"
+                        } else {
+                            ""
+                        }
+                    ),
+                    events: Vec::new(),
+                },
+                "mock-session-id".to_string(),
+            ))
+        }
+
         async fn check_available(&self) -> Result<(), String> {
             Ok(())
         }
@@ -3599,6 +3726,24 @@ mod tests {
             }
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn image_turn_reaches_agent_and_preserves_session_without_tts() {
+        crate::test_util::run_with_temp_home_async(|_| async {
+            let strategy = make_strategy(Arc::new(MockAgent));
+            strategy.tts_config.write().unwrap().active_provider = "must-not-be-created".into();
+            let image = ImageData { mime_type: "image/png".into(), data_base64: "aW1hZ2U=".into() };
+            for (prompt, expected) in [("看图", "看图 image 1"), ("继续", "继续 image 1 continued")] {
+                let (tx, mut rx) = mpsc::channel(16);
+                strategy.generate_text_response_stream_with_images(
+                    prompt.into(), vec![image.clone()], "image-test", tx, false,
+                ).await.unwrap();
+                assert!(matches!(rx.recv().await, Some(PlaybackEvent::Stt(_))));
+                assert!(matches!(rx.recv().await, Some(PlaybackEvent::LlmSentence(text)) if text == expected));
+                assert!(rx.recv().await.is_none());
+            }
+        }).await;
     }
 
     #[tokio::test]

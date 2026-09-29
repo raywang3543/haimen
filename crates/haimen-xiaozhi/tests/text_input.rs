@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use haimen_core::ImageData;
 use haimen_xiaozhi::{AudioFrame, PlaybackEvent, ResponseStrategy};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -60,6 +61,29 @@ impl ResponseStrategy for TextStrategy {
         if text == "wait" {
             std::future::pending::<()>().await;
         }
+        Ok(())
+    }
+    async fn generate_text_response_stream_with_images(
+        &self,
+        text: String,
+        images: Vec<ImageData>,
+        session_id: &str,
+        tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if images.is_empty() {
+            return self
+                .generate_text_response_stream_with_tts(text, session_id, tx, tts_enabled)
+                .await;
+        }
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        tx.send(PlaybackEvent::LlmSentence(format!(
+            "image:{}:{text}",
+            images[0].data_base64.len()
+        )))
+        .await
+        .unwrap();
         Ok(())
     }
     async fn generate_text_response_stream(
@@ -147,6 +171,32 @@ async fn typed_turns_return_text_and_audio_and_allow_next_turn() {
         assert!(matches!(next(&mut socket).await, Message::Binary(_)));
         assert_eq!(next_json(&mut socket).await["state"], "stop");
     }
+    socket.close(None).await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn image_turn_reaches_strategy_and_invalid_images_are_rejected() {
+    let (mut socket, server) = connect().await;
+    let valid = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+    send(
+        &mut socket,
+        json!({"type":"text","text":"看图","tts_enabled":false,
+        "images":[{"mime_type":"image/png","data_base64":valid}]}),
+    )
+    .await;
+    assert_eq!(
+        next_json(&mut socket).await["text"],
+        format!("image:{}:看图", valid.len())
+    );
+    assert_eq!(next_json(&mut socket).await["state"], "stop");
+    send(
+        &mut socket,
+        json!({"type":"text","text":"看图","images":[
+        {"mime_type":"image/png","data_base64":"not-base64"}]}),
+    )
+    .await;
+    assert_eq!(next_json(&mut socket).await["code"], "invalid_image");
     socket.close(None).await.unwrap();
     server.abort();
 }

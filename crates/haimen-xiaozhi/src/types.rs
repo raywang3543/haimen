@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use haimen_core::ImageData;
 use serde::{Deserialize, Serialize};
 
 // ─── 消息类型 ─────────────────────────────────────────────
@@ -30,6 +31,8 @@ pub enum ClientMessage {
     /// Typed input; skips ASR and uses the existing Agent/TTS session.
     Text {
         text: String,
+        #[serde(default)]
+        images: Vec<ImageData>,
         #[serde(default = "default_tts_enabled")]
         tts_enabled: bool,
     },

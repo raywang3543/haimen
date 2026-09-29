@@ -141,6 +141,8 @@ haimen uninstall
 
 以上是网关内部 `ImageData` 结构，**不是当前 Relay 客户端协议**。Relay 目前只接收 `payload.text`，并将图片列表设为空；Relay 客户端暂时不能通过现有协议发送图片。飞书图片由网关自动下载，不需要客户端自行编码成 Base64。
 
+小智 WebSocket 的本地 `text` 扩展可在文字消息中附带一张图片，使用同样的图片字段：`{"type":"text","text":"请描述图片","images":[{"mime_type":"image/png","data_base64":"..."}]}`。服务端校验 MIME、图片文件头、Base64 和解码后的 10 MiB 上限，再将图片交给当前 Agent。该格式适用于小智 WebSocket，不会改变 Relay 协议。
+
 图片能否交给 AI 处理还取决于 Agent：当前 Codex、Ollama、Custom 和 OpenClaw WebSocket 支持图片输入；OpenClaw CLI 模式暂不支持。所选模型也必须支持视觉输入，OpenClaw Gateway 还会校验图片和 WebSocket 请求大小。
 
 ## 快速开始

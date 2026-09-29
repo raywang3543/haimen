@@ -1185,8 +1185,10 @@ version = "0.1.5"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
+ "haimen-core",
  "serde",
  "serde_json",
  "tokio",

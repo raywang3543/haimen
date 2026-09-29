@@ -10,7 +10,7 @@ use futures_util::Stream;
 pub use provider::{AgentEventStream, AgentLogEvent, AgentOutput, AgentProvider, TextStream};
 
 /// 以 base64 保存的图片附件。编码内容不应写入日志。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct ImageData {
     pub mime_type: String,
     pub data_base64: String,

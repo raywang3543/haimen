@@ -12,6 +12,7 @@
 //! 例如 Phase 2 将新增 `TtsStrategy`，忽略设备音频，改为 TTS → PCM → Opus 下发。
 
 use async_trait::async_trait;
+use haimen_core::ImageData;
 use std::sync::Arc;
 use tokio::sync::{Notify, mpsc};
 
@@ -175,6 +176,22 @@ pub trait ResponseStrategy: Send + Sync {
             return Err("当前响应策略不支持纯文字回复".to_string());
         }
         self.generate_text_response_stream(text, session_id, frame_tx)
+            .await
+    }
+
+    /// Typed input with gateway-format image attachments.
+    async fn generate_text_response_stream_with_images(
+        &self,
+        text: String,
+        images: Vec<ImageData>,
+        session_id: &str,
+        frame_tx: mpsc::Sender<PlaybackEvent>,
+        tts_enabled: bool,
+    ) -> Result<(), String> {
+        if !images.is_empty() {
+            return Err("当前响应策略不支持图片输入".to_string());
+        }
+        self.generate_text_response_stream_with_tts(text, session_id, frame_tx, tts_enabled)
             .await
     }
 

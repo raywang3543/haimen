@@ -11,6 +11,8 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
+use base64::Engine;
+use haimen_core::ImageData;
 use uuid::Uuid;
 
 use crate::protocol::{AudioProtocol, ProtocolError, detect_and_parse, encode_protocol2};
@@ -273,8 +275,12 @@ async fn handle_text_message(text: &str, socket: &mut WebSocket, session: &mut S
                 }
                 handle_listen(state, mode, text, socket, session).await;
             }
-            ClientMessage::Text { text, tts_enabled } => {
-                handle_typed_text(text, tts_enabled, socket, session).await;
+            ClientMessage::Text {
+                text,
+                images,
+                tts_enabled,
+            } => {
+                handle_typed_text(text, images, tts_enabled, socket, session).await;
             }
             ClientMessage::Abort { request_id } => {
                 handle_abort(socket, session, request_id).await;
@@ -301,6 +307,7 @@ async fn handle_text_message(text: &str, socket: &mut WebSocket, session: &mut S
 /// Typed turns share the cancellable streaming playback path with voice turns.
 async fn handle_typed_text(
     text: String,
+    images: Vec<ImageData>,
     tts_enabled: bool,
     socket: &mut WebSocket,
     session: &mut Session,
@@ -310,6 +317,11 @@ async fn handle_typed_text(
         Some(("invalid_state", "请等待当前对话结束再发送文字"))
     } else if text.is_empty() || text.len() > 32_768 {
         Some(("invalid_text", "文字不能为空，且不能超过 32768 字节"))
+    } else if images.len() > 1 || images.iter().any(|image| !valid_image(image)) {
+        Some((
+            "invalid_image",
+            "每次最多发送一张 10 MiB 以内的 PNG、JPEG、GIF 或 WebP 图片",
+        ))
     } else {
         None
     };
@@ -333,10 +345,29 @@ async fn handle_typed_text(
     let text = text.to_string();
     let task = tokio::spawn(async move {
         strategy
-            .generate_text_response_stream_with_tts(text, &session_id, tx, tts_enabled)
+            .generate_text_response_stream_with_images(text, images, &session_id, tx, tts_enabled)
             .await
     });
     playback_frames_stream(socket, session, rx, task).await;
+}
+
+fn valid_image(image: &ImageData) -> bool {
+    if image.data_base64.is_empty() || image.data_base64.len() > 14 * 1024 * 1024 {
+        return false;
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&image.data_base64) else {
+        return false;
+    };
+    if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
+        return false;
+    }
+    match image.mime_type.as_str() {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(&b"WEBP"[..]),
+        _ => false,
+    }
 }
 
 // ─── Listen 状态机 ─────────────────────────────────────────

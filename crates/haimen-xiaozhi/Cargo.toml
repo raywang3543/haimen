@@ -17,6 +17,8 @@ futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true }
+haimen-core = { path = "../haimen-core", version = "0.1.2" }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

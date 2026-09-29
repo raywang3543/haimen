@@ -174,7 +174,7 @@ where
             }
             Err(e) => {
                 // Resume 失败时自动降级为新会话重试
-                if !need_new_session {
+                if !need_new_session && !haimen_openclaw::is_uncertain_run_error(&e) {
                     record_call("error", None, Some(&e), None, start.elapsed(), Vec::new());
                     tracing::warn!(chat_id = %chat_id, error = %e, "Resume 失败，降级为新会话重试");
                     session_mgr.remove_session(&chat_id);
@@ -472,7 +472,7 @@ pub async fn run_unified_gateway(
             }
             Ok(Err(e)) => {
                 // Resume 失败时自动降级为新会话重试（带超时保护）
-                if !need_new_session {
+                if !need_new_session && !haimen_openclaw::is_uncertain_run_error(&e) {
                     record_call("error", None, Some(&e), None, start.elapsed(), Vec::new());
                     tracing::warn!(chat_id = %chat_id, error = %e, "Resume 失败，降级为新会话重试");
                     session_mgr.remove_session(&chat_id);

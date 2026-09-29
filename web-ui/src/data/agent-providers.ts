@@ -28,8 +28,32 @@ export const AGENT_PROVIDERS: ProviderInfo[] = [
     name: 'OpenClaw',
     fields: [
       {
+        key: 'transport',
+        label: '连接方式',
+        type: 'select',
+        options: ['cli', 'websocket'],
+      },
+      {
+        key: 'gateway_url',
+        label: 'Gateway WebSocket 地址',
+        type: 'text',
+        placeholder: 'ws://127.0.0.1:18789（仅 WebSocket 模式）',
+      },
+      {
+        key: 'token_env',
+        label: 'Gateway Token 环境变量名',
+        type: 'text',
+        placeholder: 'OPENCLAW_GATEWAY_TOKEN（不填写 Token 本身）',
+      },
+      {
+        key: 'password_env',
+        label: 'Gateway 密码环境变量名',
+        type: 'text',
+        placeholder: '仅密码鉴权时填写环境变量名',
+      },
+      {
         key: 'cli_path',
-        label: 'CLI 路径',
+        label: 'CLI 路径（仅 CLI 模式）',
         type: 'text',
         placeholder: '留空使用 PATH 查找 openclaw',
       },

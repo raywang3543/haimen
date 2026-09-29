@@ -112,7 +112,7 @@ haimen uninstall
 | Ollama     | AgentProvider | 本地模型 API               |
 | Custom     | AgentProvider | OpenAI 兼容 API            |
 | Codex CLI  | AgentProvider | Codex CLI 集成             |
-| OpenClaw   | AgentProvider | OpenClaw CLI 集成          |
+| OpenClaw   | AgentProvider | OpenClaw CLI（默认）或 Gateway WebSocket |
 
 ### 消息渠道
 
@@ -141,7 +141,7 @@ haimen uninstall
 
 以上是网关内部 `ImageData` 结构，**不是当前 Relay 客户端协议**。Relay 目前只接收 `payload.text`，并将图片列表设为空；Relay 客户端暂时不能通过现有协议发送图片。飞书图片由网关自动下载，不需要客户端自行编码成 Base64。
 
-图片能否交给 AI 处理还取决于 Agent：当前 Codex、Ollama 和 Custom 支持图片输入；OpenClaw 暂不支持 haimen 的带图调用。Ollama 和 Custom 所配置的模型/服务也必须支持视觉输入。
+图片能否交给 AI 处理还取决于 Agent：当前 Codex、Ollama、Custom 和 OpenClaw WebSocket 支持图片输入；OpenClaw CLI 模式暂不支持。所选模型也必须支持视觉输入，OpenClaw Gateway 还会校验图片和 WebSocket 请求大小。
 
 ## 快速开始
 
@@ -236,11 +236,23 @@ active_provider = "codex"
 # cli_path = "/opt/codex/bin/codex"
 
 [gateway.providers.openclaw]
-# CLI 工具无需额外凭证；建议 openclaw gateway 常驻（缺失时自动降级 embedded）
+# 默认 transport = "cli"：无需额外凭证；建议 openclaw gateway 常驻（缺失时自动降级 embedded）
 # 可选：openclaw agent id（默认 "main"，OpenClaw 保留 agent）
 # agent = "ops"
 # 可选：openclaw CLI 可执行文件路径（留空按 PATH 查找 "openclaw"）
 # cli_path = "/opt/openclaw/bin/openclaw"
+# 如需试用 Gateway WebSocket，改为 transport = "websocket"（CLI 模式仍可切回）
+# transport = "websocket"
+# gateway_url = "ws://127.0.0.1:18789"
+# token_env = "OPENCLAW_GATEWAY_TOKEN"  # 环境变量名，不是 Token 本身
+# password_env = "OPENCLAW_GATEWAY_PASSWORD"  # 仅密码鉴权时需要
+
+# WebSocket 首次连接需要 Gateway 地址，以及 Gateway Token 或密码（通过环境变量传入）。
+# 如果 Gateway 要求设备配对，根据报错中的 requestId 在 OpenClaw 主机执行：
+# openclaw devices list
+# openclaw devices approve <requestId>
+# haimen 会将设备身份和配对后返回的 deviceToken 保存到 ~/.haimen/openclaw-ws-device.json；
+# 后续可用已保存的 deviceToken 连接。WebSocket 模式使用 OpenClaw agent 自己配置的工作目录。
 
 [gateway.providers.ollama]
 # 先运行 ollama pull qwen3:8b；模型 ID 必填

@@ -12,7 +12,7 @@ use super::ollama::OllamaAgent;
 use crate::config::settings::GatewayConfig;
 use crate::gateway::provider::AgentProvider;
 use haimen_codex::{CodexAgent, CodexModelConfig, DEFAULT_SANDBOX};
-use haimen_openclaw::{DEFAULT_AGENT_ID, OpenClawAgent};
+use haimen_openclaw::{DEFAULT_AGENT_ID, OpenClawAgent, OpenClawWebSocketAgent, WebSocketConfig};
 
 /// Agent 提供商的展示信息（供 Web API / 前端渲染）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,12 +162,42 @@ fn builtin() -> AgentRegistry {
         .expect("内置 Agent codex 注册失败");
     registry
         .register("openclaw", "OpenClaw", |config| {
-            // agent id 从 providers.openclaw.agent 读取，默认 "main"（OpenClaw 保留 agent）；
-            // --timeout 与网关 agent_timeout_secs 对齐
+            let fields = config.providers.get("openclaw");
+            let transport = fields
+                .and_then(|p| p.get("transport"))
+                .map(String::as_str)
+                .unwrap_or("cli");
             let cli_path = resolve_cli_path(config, "openclaw", "openclaw");
             let agent = resolve_openclaw_agent(config);
             let timeout = config.agent_timeout_secs;
-            Ok(Box::new(OpenClawAgent::new(cli_path, agent, timeout)))
+            match transport {
+                "cli" => Ok(Box::new(OpenClawAgent::new(cli_path, agent, timeout))),
+                "websocket" => {
+                    let mut ws = WebSocketConfig::new(
+                        crate::config::settings::get_settings_dir().join("openclaw-ws-device.json"),
+                    );
+                    ws.agent = agent;
+                    ws.timeout_secs = timeout;
+                    if let Some(url) = fields.and_then(|p| p.get("gateway_url")) {
+                        if !url.trim().is_empty() {
+                            ws.url = url.trim().to_string();
+                        }
+                    }
+                    if let Some(name) = fields.and_then(|p| p.get("token_env")) {
+                        if !name.trim().is_empty() {
+                            ws.token_env = name.trim().to_string();
+                        }
+                    }
+                    ws.password_env = fields
+                        .and_then(|p| p.get("password_env"))
+                        .map(String::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Ok(Box::new(OpenClawWebSocketAgent::new(ws)?))
+                }
+                other => Err(format!("不支持的 OpenClaw 连接方式: {other}")),
+            }
         })
         .expect("内置 Agent openclaw 注册失败");
     registry
@@ -254,6 +284,31 @@ mod tests {
             .build("openclaw", &test_config())
             .expect("openclaw 应可构造");
         assert_eq!(openclaw.name(), "openclaw");
+    }
+
+    #[test]
+    fn test_openclaw_websocket_is_opt_in() {
+        let mut config = test_config();
+        config.providers.insert(
+            "openclaw".to_string(),
+            HashMap::from([
+                ("transport".to_string(), "websocket".to_string()),
+                (
+                    "gateway_url".to_string(),
+                    "ws://127.0.0.1:18789".to_string(),
+                ),
+            ]),
+        );
+        assert_eq!(
+            registry().build("openclaw", &config).unwrap().name(),
+            "openclaw"
+        );
+        config
+            .providers
+            .get_mut("openclaw")
+            .unwrap()
+            .insert("transport".to_string(), "unknown".to_string());
+        assert!(registry().build("openclaw", &config).is_err());
     }
 
     #[test]

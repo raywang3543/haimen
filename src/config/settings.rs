@@ -175,10 +175,14 @@ pub struct ConnectorsSection {
 /// # model_reasoning_effort = "high"
 ///
 /// [gateway.providers.openclaw]
-/// # CLI 工具无需额外凭证；建议 openclaw gateway 常驻（缺失时自动降级 embedded）
+/// # 连接方式：cli（默认，保留原有实现）或 websocket
+/// # transport = "websocket"
+/// # gateway_url = "ws://127.0.0.1:18789"
+/// # token_env = "OPENCLAW_GATEWAY_TOKEN"
+/// # password_env = "OPENCLAW_GATEWAY_PASSWORD" # 仅密码鉴权时使用
 /// # 可选：openclaw agent id（默认 "main"，OpenClaw 保留 agent）
 /// # agent = "ops"
-/// # 可选：openclaw CLI 可执行文件路径（留空按 PATH 查找 "openclaw"）
+/// # CLI 模式可选：openclaw 可执行文件路径
 /// # cli_path = "/opt/openclaw/bin/openclaw"
 ///
 /// [gateway.providers.ollama]

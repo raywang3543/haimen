@@ -223,37 +223,55 @@ function AgentSettingsPanel() {
               </div>
 
               {/* 可配置字段 */}
-              {p.fields.map((field) => (
-                <div key={field.key} className="space-y-2">
-                  <label htmlFor={`agent-${p.id}-${field.key}`} className="text-sm font-medium">
-                    {field.label}
-                  </label>
-                  {field.type === 'select' ? (
-                    <select
-                      id={`agent-${p.id}-${field.key}`}
-                      className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                      value={editState[p.id]?.[field.key] ?? ''}
-                      onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                    >
-                      <option value="">跟随 Codex 默认</option>
-                      {field.options?.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
+              {p.fields
+                .filter(
+                  (field) =>
+                    p.id !== 'openclaw' ||
+                    field.key === 'transport' ||
+                    (editState.openclaw?.transport === 'websocket'
+                      ? field.key !== 'cli_path'
+                      : field.key === 'cli_path'),
+                )
+                .map((field) => (
+                  <div key={field.key} className="space-y-2">
+                    <label htmlFor={`agent-${p.id}-${field.key}`} className="text-sm font-medium">
+                      {field.label}
+                    </label>
+                    {field.type === 'select' ? (
+                      <select
+                        id={`agent-${p.id}-${field.key}`}
+                        className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+                        value={editState[p.id]?.[field.key] ?? ''}
+                        onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                      >
+                        <option value="">
+                          {field.key === 'transport' ? 'cli（默认）' : '跟随 Codex 默认'}
                         </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <Input
-                      id={`agent-${p.id}-${field.key}`}
-                      type={field.type === 'password' ? 'password' : 'text'}
-                      autoComplete={field.type === 'password' ? 'new-password' : undefined}
-                      placeholder={field.placeholder ?? `输入${field.label}`}
-                      value={editState[p.id]?.[field.key] ?? ''}
-                      onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                    />
-                  )}
-                </div>
-              ))}
+                        {field.options?.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <Input
+                        id={`agent-${p.id}-${field.key}`}
+                        type={field.type === 'password' ? 'password' : 'text'}
+                        autoComplete={field.type === 'password' ? 'new-password' : undefined}
+                        placeholder={field.placeholder ?? `输入${field.label}`}
+                        value={editState[p.id]?.[field.key] ?? ''}
+                        onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                      />
+                    )}
+                  </div>
+                ))}
+
+              {p.id === 'openclaw' && editState.openclaw?.transport === 'websocket' && (
+                <p className="text-sm text-muted-foreground">
+                  Token 或密码从海门进程的环境变量读取。首次连接若提示待配对，请在 OpenClaw
+                  主机批准设备请求后重新验证。
+                </p>
+              )}
 
               {p.id === 'codex' && (
                 <p className="text-sm text-muted-foreground">

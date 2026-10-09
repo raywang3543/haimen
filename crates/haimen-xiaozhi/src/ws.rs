@@ -131,6 +131,13 @@ async fn handle_ws_connection(
         return;
     }
 
+    if session.session_id.is_empty() {
+        return;
+    }
+    session
+        .strategy
+        .on_session_started(&session.session_id, &session.device_id);
+
     // ── 消息循环 ──
     loop {
         // 录音状态下，用 select! 竞争消息、VAD 完成信号和安全超时
@@ -245,6 +252,7 @@ async fn handle_ws_connection(
         }
     }
 
+    session.strategy.on_session_closed(&session.session_id);
     tracing::info!(
         device_id = %session.device_id,
         session_id = %session.session_id,

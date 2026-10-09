@@ -11,6 +11,7 @@ use crate::gateway::channel::MessageChannel;
 use crate::gateway::model::Message;
 use crate::gateway::provider::AgentLogEvent;
 use crate::gateway::session::{SessionKey, SessionManager};
+use crate::memory::MemoryRuntime;
 
 /// 内置网关命令
 enum GatewayCommand {
@@ -52,6 +53,7 @@ where
     let max_turns = config.session_max_turns;
     let work_dir = resolve_work_dir(config.work_dir.clone());
     let mut session_mgr = SessionManager::new(idle_timeout, max_turns);
+    let memory = MemoryRuntime::new(config.memory.clone());
 
     // 3. 启动消息流
     let mut stream = channel.listen().await?;
@@ -91,6 +93,24 @@ where
             continue;
         }
 
+        let turn = memory
+            .prepare(
+                channel.name(),
+                &message.sender_id,
+                &chat_id,
+                message.conversation_kind == haimen_core::ConversationKind::Private,
+                &message.content,
+            )
+            .await;
+        if turn.reset_session {
+            session_mgr.remove_session(&chat_id);
+        }
+        if let Some(reply) = turn.reply {
+            let _ = channel.send(&chat_id, &reply).await;
+            continue;
+        }
+        let agent_input = turn.input;
+
         // 会话管理（取当前 Agent 快照：一条消息内 agent/name/generation 保持一致）
         let snap = snapshot(agent);
         let (need_new_session, existing_session_id) =
@@ -101,12 +121,12 @@ where
         let start = std::time::Instant::now();
         let result = if need_new_session {
             snap.agent
-                .process_with_images(&message.content, &images, None, &work_dir)
+                .process_with_images(&agent_input, &images, None, &work_dir)
                 .await
         } else {
             snap.agent
                 .process_with_images(
-                    &message.content,
+                    &agent_input,
                     &images,
                     existing_session_id.as_deref(),
                     &work_dir,
@@ -182,7 +202,7 @@ where
                     let retry_start = std::time::Instant::now();
                     match snap
                         .agent
-                        .process_with_images(&message.content, &images, None, &work_dir)
+                        .process_with_images(&agent_input, &images, None, &work_dir)
                         .await
                     {
                         Ok((agent_output, new_session_id)) => {
@@ -265,6 +285,7 @@ pub async fn run_unified_gateway(
     let max_turns = config.session_max_turns;
     let work_dir = resolve_work_dir(config.work_dir.clone());
     let mut session_mgr = SessionManager::new(idle_timeout, max_turns);
+    let memory = MemoryRuntime::new(config.memory.clone());
 
     // 2. 创建全局 mpsc 通道（替代 select_all）
     let (global_tx, mut global_rx) = mpsc::unbounded_channel::<(String, Message)>();
@@ -386,6 +407,23 @@ pub async fn run_unified_gateway(
             continue;
         }
 
+        let turn = tokio::select! {
+            turn = memory.prepare(
+                &connector_name, &message.sender_id, &chat_id,
+                message.conversation_kind == haimen_core::ConversationKind::Private,
+                &message.content,
+            ) => turn,
+            _ = cancel.cancelled() => break,
+        };
+        if turn.reset_session {
+            session_mgr.remove_session(&chat_id);
+        }
+        if let Some(reply) = turn.reply {
+            let _ = channel.send(&message.conversation_id, &reply).await;
+            continue;
+        }
+        let agent_input = turn.input;
+
         // 会话管理（取当前 Agent 快照：一条消息内 agent/name/generation 保持一致）
         let snap = snapshot(agent);
         let (need_new_session, existing_session_id) =
@@ -396,10 +434,10 @@ pub async fn run_unified_gateway(
         let start = std::time::Instant::now();
         let process_fut = if need_new_session {
             snap.agent
-                .process_with_images(&message.content, &images, None, &work_dir)
+                .process_with_images(&agent_input, &images, None, &work_dir)
         } else {
             snap.agent.process_with_images(
-                &message.content,
+                &agent_input,
                 &images,
                 existing_session_id.as_deref(),
                 &work_dir,
@@ -480,7 +518,7 @@ pub async fn run_unified_gateway(
                     let retry_start = std::time::Instant::now();
                     let retry_fut =
                         snap.agent
-                            .process_with_images(&message.content, &images, None, &work_dir);
+                            .process_with_images(&agent_input, &images, None, &work_dir);
                     let retry_result = tokio::time::timeout(timeout_duration, retry_fut).await;
 
                     match retry_result {
@@ -679,6 +717,8 @@ async fn handle_command<C: MessageChannel + ?Sized>(
                 "  /status 或 /状态  查看当前会话状态",
                 "  /help 或 /帮助  显示此帮助",
                 "",
+                "  /memory  长期记忆帮助（仅私聊）",
+                "",
                 "其他消息会自动发送给 AI 处理，",
                 "同一对话的上下文会自动保持。",
             ]
@@ -746,6 +786,8 @@ async fn handle_command_for_channel(
                 "  /status 或 /状态  查看当前会话状态",
                 "  /help 或 /帮助  显示此帮助",
                 "",
+                "  /memory  长期记忆帮助（仅私聊）",
+                "",
                 "其他消息会自动发送给 AI 处理，",
                 "同一对话的上下文会自动保持。",
             ]
@@ -807,6 +849,133 @@ pub fn expand_tilde(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    type MemoryCalls = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    #[derive(Clone, Default)]
+    struct MemoryRecordingAgent {
+        calls: MemoryCalls,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gateway::provider::AgentProvider for MemoryRecordingAgent {
+        fn name(&self) -> &str {
+            "memory-recording"
+        }
+        async fn check_available(&self) -> Result<(), String> {
+            Ok(())
+        }
+        async fn process(
+            &self,
+            input: &str,
+            session: Option<&str>,
+            _: &str,
+        ) -> Result<(crate::gateway::provider::AgentOutput, String), String> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((input.into(), session.map(str::to_string)));
+            Ok((
+                crate::gateway::provider::AgentOutput {
+                    text: "回答".into(),
+                    events: vec![],
+                },
+                format!("session-{}", calls.len()),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_commands_and_context_work_in_both_gateway_loops() {
+        for unified in [false, true] {
+            let service = crate::memory::tests::mock_service(
+                axum::http::StatusCode::OK,
+                Duration::ZERO,
+                false,
+            )
+            .await;
+            let channel = MockChannel::new(
+                "lark",
+                [
+                    "记住：我喜欢简短回答",
+                    "怎样回答",
+                    "/new",
+                    "怎样回答",
+                    "暂停记忆",
+                    "你好",
+                    "恢复记忆",
+                    "怎样回答",
+                    "查看记忆",
+                ]
+                .into_iter()
+                .map(|text| test_msg("private", text))
+                .collect(),
+            );
+            let sent = channel.sent.clone();
+            let agent = MemoryRecordingAgent::default();
+            let calls = agent.calls.clone();
+            let config = GatewayConfig {
+                memory: service.config.clone(),
+                ..Default::default()
+            };
+            if unified {
+                let _ = run_gateway_test(
+                    vec![("lark", channel)],
+                    agent,
+                    config,
+                    CancellationToken::new(),
+                )
+                .await;
+            } else {
+                let shared = crate::gateway::agent_handle::into_shared(Box::new(agent));
+                crate::test_util::run_with_temp_home_async(|_| async move {
+                    let _ = run_chat_loop(&channel, &shared, &config).await;
+                })
+                .await;
+            }
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 4);
+            assert!(calls[0].0.contains("我喜欢简短回答"));
+            assert!(calls[1].0.contains("我喜欢简短回答"));
+            assert_eq!(calls[2].0, "你好");
+            assert!(calls[3].0.contains("我喜欢简短回答"));
+            assert!(
+                calls.iter().all(|(_, session)| session.is_none()),
+                "commands must reset prior context"
+            );
+            assert!(
+                sent.lock()
+                    .unwrap()
+                    .iter()
+                    .any(|reply| reply.contains("新增 1 条"))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_group_and_unknown_messages_never_recall_personal_memory() {
+        let service =
+            crate::memory::tests::mock_service(axum::http::StatusCode::OK, Duration::ZERO, false)
+                .await;
+        let mut group = test_msg("group", "群聊问题");
+        group.conversation_kind = haimen_core::ConversationKind::Group;
+        let mut unknown = test_msg("unknown", "未知来源问题");
+        unknown.conversation_kind = haimen_core::ConversationKind::Unknown;
+        let channel = MockChannel::new("lark", vec![group, unknown]);
+        let agent = MemoryRecordingAgent::default();
+        let calls = agent.calls.clone();
+        let config = GatewayConfig {
+            memory: service.config.clone(),
+            ..Default::default()
+        };
+        let _ = run_gateway_test(
+            vec![("lark", channel)],
+            agent,
+            config,
+            CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert!(service.requests.lock().unwrap().is_empty());
+    }
+
     use super::*;
     use crate::gateway::provider::{AgentOutput, AgentProvider};
     use std::collections::VecDeque;
@@ -826,7 +995,7 @@ mod tests {
     struct MockChannel {
         name: &'static str,
         msgs: Mutex<VecDeque<Message>>,
-        sent: Mutex<Vec<String>>,
+        sent: Arc<Mutex<Vec<String>>>,
         send_fail: bool,
         listen_fail: bool,
         /// listen() panics
@@ -840,7 +1009,7 @@ mod tests {
             Self {
                 name,
                 msgs: Mutex::new(VecDeque::from(msgs)),
-                sent: Mutex::new(Vec::new()),
+                sent: Arc::new(Mutex::new(Vec::new())),
                 send_fail: false,
                 listen_fail: false,
                 listen_panic: false,
@@ -1025,6 +1194,7 @@ mod tests {
 
     fn test_msg(conversation_id: &str, content: &str) -> Message {
         Message {
+            conversation_kind: haimen_core::ConversationKind::Private,
             id: format!("msg-{}", MSG_COUNTER.fetch_add(1, Ordering::Relaxed)),
             conversation_id: conversation_id.to_string(),
             sender_id: "test-sender".to_string(),
@@ -1066,7 +1236,13 @@ mod tests {
     }
 
     fn default_config() -> GatewayConfig {
-        GatewayConfig::default()
+        GatewayConfig {
+            memory: crate::memory::MemoryConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     // ---------------------------------------------------------------------------

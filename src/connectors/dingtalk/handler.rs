@@ -149,14 +149,15 @@ pub fn try_parse_message(
             "/conversationType",
         ],
     )
-    .unwrap_or("p2p")
+    .unwrap_or("unknown")
     .to_string();
 
     // 钉钉 Stream 协议: conversationType = "1"(单聊) / "2"(群聊)
     // 统一转为 haimen 内部格式: "p2p" / "group"
     let conversation_type = match conversation_type.as_str() {
         "2" | "group" => "group".to_string(),
-        _ => "p2p".to_string(),
+        "1" | "p2p" => "p2p".to_string(),
+        _ => "unknown".to_string(),
     };
 
     let create_time: i64 = root
@@ -195,6 +196,11 @@ pub fn try_parse_message(
     );
 
     Some(Message {
+        conversation_kind: match conversation_type.as_str() {
+            "p2p" => haimen_core::ConversationKind::Private,
+            "group" => haimen_core::ConversationKind::Group,
+            _ => haimen_core::ConversationKind::Unknown,
+        },
         id: msg_id,
         conversation_id: session_key,
         sender_id,
@@ -330,7 +336,22 @@ mod tests {
         assert_eq!(msg.sender_id, "user123");
         assert_eq!(msg.content, "你好");
         assert_eq!(msg.channel, "dingtalk");
+        assert_eq!(msg.conversation_kind, haimen_core::ConversationKind::Group);
         assert!(msg.conversation_id.starts_with("dingtalk:g:cid_abc"));
+    }
+
+    #[test]
+    fn memory_requires_an_explicit_private_conversation_type() {
+        for (kind, expected) in [
+            (Some("1"), haimen_core::ConversationKind::Private),
+            (Some("2"), haimen_core::ConversationKind::Group),
+            (Some("unexpected"), haimen_core::ConversationKind::Unknown),
+            (None, haimen_core::ConversationKind::Unknown),
+        ] {
+            let data = serde_json::json!({ "msgId":"m", "senderStaffId":"alice", "conversationId":"c", "conversationType":kind, "createAt":Utc::now().timestamp_millis(), "text":{"content":"hi"} });
+            let message = try_parse_message(&data.to_string(), "*", false).unwrap();
+            assert_eq!(message.conversation_kind, expected);
+        }
     }
 
     #[test]

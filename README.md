@@ -97,6 +97,7 @@ haimen uninstall
 
 - **多消息渠道** — 集成飞书/Lark、钉钉、Relay 中转、GitHub Webhook，统一消息模型
 - **多 AI 后端** — 支持 Ollama、Custom、Codex CLI、OpenClaw
+- **长期记忆** — 可接入 HTTP Memory Service，私聊自动检索、显式保存，跨会话和 Agent 复用
 - **小智 AI 硬件** — 原生支持 小智 AI 聊天硬件（WebSocket 音频流协议）
 - **Web 管理控制台** — 内置 HTTP 服务器 + React SPA，管理配置、Agent 和语音
 - **TOML 配置管理** — 支持多服务商配置和环境变量引用 `${env.VAR}`
@@ -144,6 +145,62 @@ haimen uninstall
 小智 WebSocket 的本地 `text` 扩展可在文字消息中附带一张图片，使用同样的图片字段：`{"type":"text","text":"请描述图片","images":[{"mime_type":"image/png","data_base64":"..."}]}`。服务端校验 MIME、图片文件头、Base64 和解码后的 10 MiB 上限，再将图片交给当前 Agent。该格式适用于小智 WebSocket，不会改变 Relay 协议。
 
 图片能否交给 AI 处理还取决于 Agent：当前 Codex、Ollama、Custom 和 OpenClaw WebSocket 支持图片输入；OpenClaw CLI 模式暂不支持。所选模型也必须支持视觉输入，OpenClaw Gateway 还会校验图片和 WebSocket 请求大小。
+
+## 长期记忆
+
+长期记忆默认开启，默认服务地址为 `http://127.0.0.1:8000`。
+使用局域网 Memory Service 时，在 `~/.haimen/settings.toml` 中配置地址，然后重启 haimen：
+
+```toml
+[gateway.memory]
+enabled = true
+base_url = "http://192.168.50.38:8000"
+# 服务启用鉴权时配置；密钥支持环境变量引用
+# api_key = "${env.MEMORY_SERVICE_API_KEY}"
+namespace = "haimen"
+search_limit = 5
+read_timeout_ms = 3000
+write_timeout_secs = 30
+max_context_chars = 4000
+
+# 可选：将经过确认的渠道账号、个人设备绑定到同一个记忆空间。
+# 映射值是 Memory Service 工作台中的“用户标识”；填写 default 可复用该空间。
+[gateway.memory.user_mapping]
+# "lark:ou_your_user_id" = "ray"
+# "dingtalk:your_sender_id" = "ray"
+# "xiaozhi:your_device_id" = "ray"
+```
+
+设置 `[gateway.memory]` 下的 `enabled = false` 可关闭长期记忆；已有的关闭配置仍然生效。
+
+未配置映射时，用户标识为 `<namespace>:<connector>:<sender_id>`，例如
+`haimen:lark:ou_example`；小智使用稳定的 `Device-Id`，不使用每次连接变化的会话 ID。
+共享设备不能代表某个具体使用者，只应绑定到设备自己的空间。
+
+飞书和钉钉已识别的私聊，以及小智 ASR→LLM→TTS 模式的语音、文字、图片追问，
+会在调用 Agent 前检索相关记忆。群聊、缺失身份、未知会话类型、Relay 和 GitHub
+当前不使用个人长期记忆。固定文本回复模式跳过记忆；独立的 `haimen agent chat`
+暂不接入长期记忆。
+
+| 操作 | 输入示例 | 行为 |
+| --- | --- | --- |
+| 明确保存 | `记住：我喜欢简短回答` 或 `/memory remember 我喜欢简短回答` | 直接提交完整事实，报告新增、更新、删除或跳过的实际结果 |
+| 查看记忆 | `查看记忆` 或 `/memory list` | 显示当前用户的前 20 条记忆 |
+| 暂停记忆 | `暂停记忆` 或 `/memory pause` | 暂停本会话的读写，并重置 Agent 上下文；恢复、重启或小智重新连接后可继续使用 |
+| 恢复记忆 | `恢复记忆` 或 `/memory resume` | 恢复读写，并开启新的 Agent 会话 |
+| 开新会话 | `/new` 或 `/新会话` | 清空当前上下文，保留服务端的长期记忆 |
+| 帮助 | `/memory` | 查看记忆命令 |
+
+第一版只保存用户明确要求记住的事实，普通对话和模型回复不会自动写入。
+记忆作为参考背景，当前用户的明确要求优先。检索失败或超时后继续普通聊天；
+显式保存失败会告知未确认成功，不自动重试写入。服务返回 `index_pending = true`
+时，保存的变更需要等待检索索引同步。
+
+Memory Service 需要提供 `POST /memories`、`POST /memories/search` 和
+`GET /memories/{user_id}/all`，可使用 Bearer API Key。
+当前服务只有删除用户全部记忆的接口，haimen 首版不提供删除命令；
+“忘掉/忘记”指令会说明尚未执行删除。接入单条遗忘需要服务增加对应接口。
+记忆暂停会重置上下文，但不会删除调用日志或服务端记录。
 
 ## 快速开始
 

@@ -202,6 +202,9 @@ pub struct ConnectorsSection {
 /// 旧格式 `agent = "codex"` 在加载时自动迁移到 `active_provider = "codex"`。
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct GatewayConfig {
+    /// 长期记忆服务；默认开启，独立于 Agent 会话。
+    #[serde(default)]
+    pub memory: crate::memory::MemoryConfig,
     /// 当前激活的 AI Agent 提供商
     #[serde(default = "default_agent_provider")]
     pub active_provider: String,
@@ -248,6 +251,7 @@ fn default_agent_timeout() -> u64 {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            memory: Default::default(),
             active_provider: default_agent_provider(),
             providers: HashMap::new(),
             api_key: None,
@@ -295,6 +299,7 @@ impl Default for AgentLogConfig {
 /// 旧格式 Gateway 配置（用于向后兼容反序列化）
 #[derive(Debug, Clone, Deserialize)]
 struct GatewayConfigLegacy {
+    memory: Option<crate::memory::MemoryConfig>,
     agent: Option<String>,
     active_provider: Option<String>,
     providers: Option<HashMap<String, HashMap<String, String>>>,
@@ -316,6 +321,7 @@ impl<'de> Deserialize<'de> for GatewayConfig {
         // 如果已有新格式字段，直接使用
         if let Some(active) = legacy.active_provider {
             return Ok(Self {
+                memory: legacy.memory.unwrap_or_default(),
                 active_provider: active,
                 providers: legacy.providers.unwrap_or_default(),
                 api_key: legacy.api_key,
@@ -337,6 +343,7 @@ impl<'de> Deserialize<'de> for GatewayConfig {
         let active_provider = legacy.agent.unwrap_or_else(default_agent_provider);
 
         Ok(Self {
+            memory: legacy.memory.unwrap_or_default(),
             active_provider,
             providers: legacy.providers.unwrap_or_default(),
             api_key: legacy.api_key,

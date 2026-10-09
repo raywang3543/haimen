@@ -9,6 +9,7 @@ pub mod datetime;
 pub mod edge_tts;
 pub mod gateway;
 pub mod logging;
+pub mod memory;
 #[cfg(target_os = "macos")]
 pub mod native_tts;
 pub mod sensevoice_asr;

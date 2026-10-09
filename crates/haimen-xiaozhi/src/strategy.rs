@@ -30,6 +30,12 @@ use crate::types::{AudioFrame, AudioParams, PlaybackEvent};
 /// 默认实现（Echo、TTS 等）的钩子均为 no-op，不受影响。
 #[async_trait]
 pub trait ResponseStrategy: Send + Sync {
+    /// Associate the transport session with a stable device identity.
+    fn on_session_started(&self, _session_id: &str, _device_id: &str) {}
+
+    /// Release per-connection business state.
+    fn on_session_closed(&self, _session_id: &str) {}
+
     /// 策略名称（用于日志和诊断）
     fn name(&self) -> &'static str;
 

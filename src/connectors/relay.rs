@@ -340,6 +340,7 @@ fn parse_device_message(payload: Value, pair: &str) -> Option<Message> {
         return None;
     }
     Some(Message {
+        conversation_kind: haimen_core::ConversationKind::Unknown,
         id: payload
             .id
             .filter(|value| !value.is_empty())

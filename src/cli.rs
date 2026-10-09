@@ -471,13 +471,16 @@ pub async fn run(cli: Cli) -> Result<(), String> {
                 ))
             } else {
                 // 默认 ASR-LLM-TTS 模式
-                Arc::new(crate::xiaozhi_asr_llm_tts::AsrLlmTtsStrategy::from_config(
-                    shared_asr_config.clone(),
-                    shared_tts_config.clone(),
-                    xiaozhi_tts_voice,
-                    serve_agent.clone(),
-                    work_dir,
-                )?)
+                Arc::new(
+                    crate::xiaozhi_asr_llm_tts::AsrLlmTtsStrategy::from_config(
+                        shared_asr_config.clone(),
+                        shared_tts_config.clone(),
+                        xiaozhi_tts_voice,
+                        serve_agent.clone(),
+                        work_dir,
+                    )?
+                    .with_memory(settings.gateway.memory.clone()),
+                )
             };
 
             let serve_config = crate::web::ServeConfig {

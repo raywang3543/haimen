@@ -26,8 +26,18 @@ impl std::fmt::Debug for ImageData {
 }
 
 /// 统一消息模型
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConversationKind {
+    Private,
+    Group,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub struct Message {
+    /// 只有连接器明确识别的私聊才能使用个人长期记忆。
+    pub conversation_kind: ConversationKind,
     /// 平台内唯一消息 ID
     pub id: String,
     /// 会话标识（对应 chat_id / thread_id / conversation_id）

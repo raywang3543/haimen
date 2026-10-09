@@ -111,7 +111,8 @@ fn build_xiaozhi_strategy(
             None, // voice_override
             shared_agent,
             work_dir,
-        ),
+        )
+        .with_memory(config.gateway.memory.clone()),
     ))
 }
 

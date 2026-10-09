@@ -94,6 +94,11 @@ impl MessageChannel for LarkChannel {
                 return None;
             }
             let message = Message {
+                conversation_kind: match event.chat_type.as_str() {
+                    "p2p" => haimen_core::ConversationKind::Private,
+                    "group" => haimen_core::ConversationKind::Group,
+                    _ => haimen_core::ConversationKind::Unknown,
+                },
                 id: event.message_id,
                 conversation_id: event.chat_id,
                 sender_id: event.sender_id,
